@@ -108,7 +108,11 @@ static int fix_intro(int mode) {
    Characters in event scenes (entries, transformations, defeat moves, their Library replays) are
    updated with a literal step of 1.0 per frame (movss xmm1, [1.0] before call [rax+40h], found with
    TraceMotion); those two loads now read the game's frame-time step (1405c63ac, which also follows
-   slow motion) like normal gameplay. ---- */
+   slow motion) like normal gameplay.
+   The scene updates for event/Library scenes (14015e16d) and late battle states such as the defeat
+   sequences (14013b35a) clamp their step to max(frame time, 1.0), like the limiter did: their
+   "comiss xmm7(1.0), xmm6; jbe; movaps xmm6, xmm7" becomes a jmp over the clamp. ---- */
+static const ULONGLONG dt_clamp[2] = {0x14013b362, 0x14015e175};
 void obj_adv(void), mat_adv(void);
 ULONGLONG g_frametime;
 
@@ -123,11 +127,14 @@ static int fix_fps(int f) {
     for (i = 0; i < 2; i++)                                 /* movss xmm1, [rip -> 1.0] */
         if (!is(ev_step[i], "\xf3\x0f\x10\x0d", 4) || rip_target(ev_step[i], 4, 8) != VA(0x14057643c) ||
             *(float *)VA(0x14057643c) != 1.0f) return 0;
+    for (i = 0; i < 2; i++)                                 /* comiss xmm7, xmm6; jbe +3; movaps xmm6, xmm7 */
+        if (!is(dt_clamp[i], "\x0f\x2f\xfe\x76\x03\x0f\x28\xf7", 8)) return 0;
     if (f == 60) return 1;
     t[0] = f / 2; t[1] = f;
     put(VA(0x140573af8), t, sizeof t);
     put(VA(0x14026ccc2), "\xeb", 1);                       /* frame time below 1/60 s is kept */
     g_frametime = (ULONGLONG)rip_target(0x14026ccd2, 4, 8);   /* where the limiter stores it */
+    for (i = 0; i < 2; i++) put(VA(dt_clamp[i] + 3), "\xeb", 1);   /* scene steps below 1.0 are kept */
     for (i = 0; i < 2; i++) {                               /* event characters: game step instead of 1.0 */
         int d = (int)(VA(0x1405c63ac) - (VA(ev_step[i]) + 8));
         put(VA(ev_step[i] + 4), &d, 4);
@@ -532,13 +539,15 @@ typedef void(__fastcall *UpdFn)(BYTE *, float);
 static UpdFn tmo_tramp, blend_tramp;
 static ULONGLONG mot_seen[512]; static int nmot;
 static void mot_record(BYTE *m, float dt, ULONGLONG *sp) {
-    ULONGLONG chain[6], h = 0; int i, n = 0;
+    ULONGLONG chain[12], h = 0; void *fr[24]; int i, n = 0, k;
     if (dt != 1.0f || *(float *)(base + 0x60fc00) >= 0.75f) return;     /* only at high frame rates */
     if (*(float *)(m + 0x50) <= 0) return;                              /* empty motion */
-    for (i = 0; i < 160 && n < 6; i++)                                   /* game code on the stack */
-        if (sp[i] > (ULONGLONG)base + 0x1000 && sp[i] < (ULONGLONG)base + 0x346000) {
-            chain[n++] = sp[i] - (ULONGLONG)base + 0x140000000ULL; h = h * 31 + chain[n - 1];
+    k = RtlCaptureStackBackTrace(0, 24, fr, 0);                          /* real call chain (unwind data) */
+    for (i = 0; i < k && n < 12; i++)
+        if ((BYTE *)fr[i] > base + 0x1000 && (BYTE *)fr[i] < base + 0x346000) {
+            chain[n++] = (ULONGLONG)((BYTE *)fr[i] - base) + 0x140000000ULL; h = h * 31 + chain[n - 1];
         }
+    (void)sp;
     if (n && chain[0] == 0x1402239bbULL) return;                         /* UI animations (separate issue) */
     for (i = 0; i < nmot && mot_seen[i] != h; i++);
     if (i < nmot || nmot == 512) return;
