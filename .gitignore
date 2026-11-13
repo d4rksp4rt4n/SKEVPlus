@@ -5,3 +5,4 @@ dinput8.dll
 *.exp
 *.log
 *.bak
+test_evsm.exe
