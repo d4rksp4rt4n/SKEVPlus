@@ -244,6 +244,44 @@ typedef HRESULT(WINAPI *CreateDevSC)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, U
                                      ID3D11DeviceContext **);
 static CreateDevSC dev_orig;
 
+/* ---- AOBlur: the SSAO pass ('SSAO', HBAO with a per-pixel random rotation) goes straight into the
+   composite ('AOCP': screen * ao^2) without any blur, so its noise shows as grain in creases and
+   contact areas. The composite is replaced by one that first blurs the AO 5x5, weighted by the depth
+   the HBAO pass stores next to it (.y), so the blur doesn't cross object edges. ---- */
+static const char aocp_hlsl[] =
+    "Texture2D screenTex : register(t0); Texture2D ssaoTex : register(t1); SamplerState samp0 : register(s0);\n"
+    "float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target {\n"
+    "  float w, h; ssaoTex.GetDimensions(w, h); float2 px = float2(1.0 / w, 1.0 / h);\n"
+    "  float2 c = ssaoTex.SampleLevel(samp0, uv, 0).xy; float sum = 0, wsum = 0;\n"
+    "  [unroll] for (int y = -2; y <= 2; y++) [unroll] for (int x = -2; x <= 2; x++) {\n"
+    "    float2 s = ssaoTex.SampleLevel(samp0, uv + float2(x, y) * px, 0).xy;\n"
+    "    float wt = saturate(1.0 - abs(s.y - c.y) / (0.03 * abs(c.y) + 1e-4));\n"
+    "    sum += s.x * wt; wsum += wt; }\n"
+    "  float ao = sum / max(wsum, 1e-4);\n"
+    "  return float4(screenTex.Sample(samp0, uv).rgb * ao * ao, 1.0); }\n";
+typedef HRESULT(WINAPI *CompileFn)(const void *, SIZE_T, const char *, const void *, void *, const char *, const char *,
+                                   UINT, UINT, ID3DBlob **, ID3DBlob **);
+typedef HRESULT(STDMETHODCALLTYPE *CreatePS)(ID3D11Device *, const void *, SIZE_T, ID3D11ClassLinkage *, ID3D11PixelShader **);
+static CreatePS ps_orig;
+static int aoblur_on;
+
+static HRESULT STDMETHODCALLTYPE ps_hook(ID3D11Device *dev, const void *code, SIZE_T len, ID3D11ClassLinkage *cl, ID3D11PixelShader **ps) {
+    const BYTE *aocp = VA(0x1404d28e0);
+    if (code && len == *(DWORD *)(aocp + 24) && !memcmp(code, aocp, len)) {
+        HMODULE m = LoadLibraryA("d3dcompiler_47.dll");
+        CompileFn compile = m ? (CompileFn)GetProcAddress(m, "D3DCompile") : 0;
+        ID3DBlob *b = 0, *err = 0; HRESULT r = E_FAIL;
+        if (compile && SUCCEEDED(compile(aocp_hlsl, sizeof aocp_hlsl - 1, "aoblur", 0, 0, "main", "ps_4_0", 0, 0, &b, &err)))
+            r = ps_orig(dev, ID3D10Blob_GetBufferPointer(b), ID3D10Blob_GetBufferSize(b), cl, ps);
+        say("AOBlur: SSAO composite shader %s\n", SUCCEEDED(r) ? "replaced (AO blurred)" : "NOT replaced (compile failed), original kept");
+        save_log();
+        if (b) ID3D10Blob_Release(b);
+        if (err) ID3D10Blob_Release(err);
+        if (SUCCEEDED(r)) return r;
+    }
+    return ps_orig(dev, code, len, cl, ps);
+}
+
 static void hook_slot(void **vt, int i, void *hook, void **orig) {
     if (vt[i] != hook) { *orig = vt[i]; put(&vt[i], &hook, sizeof hook); }
 }
@@ -255,6 +293,8 @@ static HRESULT WINAPI dev_hook(IDXGIAdapter *ad, D3D_DRIVER_TYPE type, HMODULE s
     if (SUCCEEDED(r) && dev && *dev) {
         if (aniso_level)
             hook_slot(*(void ***)*dev, 23, (void *)ss_hook, (void **)&ss_orig);      /* CreateSamplerState */
+        if (aoblur_on)
+            hook_slot(*(void ***)*dev, 15, (void *)ps_hook, (void **)&ps_orig);      /* CreatePixelShader */
         if (res_w && sc && *sc) {
             hook_slot(*(void ***)*sc, 10, (void *)setfs_hook, (void **)&setfs_orig);  /* SetFullscreenState */
             hook_slot(*(void ***)*sc, 13, (void *)rb_hook, (void **)&rb_orig);        /* ResizeBuffers */
@@ -304,6 +344,9 @@ static void install(HMODULE self) {
     else say("Anisotropy=%d: SKIPPED - must be 0..16\n", v);
     v = opt("SkipIntro", 2);
     if (v >= 0 && v <= 2) report("SkipIntro", v, fix_intro(v)); else say("SkipIntro=%d: SKIPPED - must be 0..2\n", v);
+    v = opt("AOBlur", 1);
+    aoblur_on = v && !memcmp(VA(0x1404d28e0), "DXBC", 4) && *(DWORD *)VA(0x1404d28f8) < 4096;
+    say("AOBlur=%d: %s\n", v, !v ? "off" : aoblur_on ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
     v = opt("ShadowResolution", 1536);
     if (v >= 512 && v <= 8192) say("ShadowResolution=%d: %s\n", v, fix_shadow(v) ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
     else say("ShadowResolution=%d: SKIPPED - must be 512..8192\n", v);
