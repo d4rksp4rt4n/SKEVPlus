@@ -1,8 +1,32 @@
 ; Small x64 stubs called from the game's code (via a jump slot near the exe, see near_jmp in skmod.c).
 ; Each replaces the game instructions noted and keeps every register the game still uses there.
 EXTERN g_scene:QWORD, g_flag:QWORD, g_app:QWORD, res_w:DWORD, res_h:DWORD, fov_ref:DWORD, near_max:DWORD, one_f:DWORD, shadow_vt:QWORD, g_dofnear:QWORD, shadow_ret:QWORD
-EXTERN g_frametime:QWORD
+EXTERN g_frametime:QWORD, ui_acc:DWORD
 .code
+
+; FrameRate (FastMenus=0): the UI manager update computes its step as max(1.0, frame time). Menu logic
+; expects whole steps (e.g. waits for an animation to land on an exact frame: a fractional step made
+; the lottery menu hang), so above 60 fps time is accumulated and the UI gets 1.0 on the frames where
+; a full 1/60 s has passed and 0 on the others: same speed, same whole frames as at 60 fps.
+; Replaces "comiss xmm6, xmm0; ja +3; movaps xmm6, xmm0" (xmm6 = 1.0, xmm0 = frame time).
+ui_step PROC
+    comiss xmm0, dword ptr one_f
+    jb short_frame
+    movaps xmm6, xmm0                   ; 1/60 s or longer: original behaviour
+    mov dword ptr ui_acc, 0
+    ret
+short_frame:
+    addss xmm0, dword ptr ui_acc
+    comiss xmm0, dword ptr one_f
+    jb not_yet
+    subss xmm0, dword ptr one_f         ; xmm6 stays 1.0
+    movss dword ptr ui_acc, xmm0
+    ret
+not_yet:
+    movss dword ptr ui_acc, xmm0
+    xorps xmm6, xmm6
+    ret
+ui_step ENDP
 
 ; FrameRate: model instances advance their object animation (frame +60h += speed +64h) and material
 ; animation (frame +80h += speed +84h) once per frame. Some callers set the speed from the frame time
