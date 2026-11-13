@@ -133,9 +133,16 @@ ULONGLONG shadow_vt;
 
 static int fix_near(float n) {
     static const char first[] = "\xf3\x0f\x10\x81\x60\x02\x00\x00";      /* movss xmm0, [rcx+260h] */
+    static const float dof[2] = {1.0f, 8500.0f};
+    float dn;
     if (!is(0x1402430d0, first, 8) || !is(0x140243110, first, 8) ||          /* + CShadowCamera vtable check */
-        *(ULONGLONG *)VA(0x1404ec718 + 0xa0) != (ULONGLONG)VA(0x140243110)) return 0;
+        *(ULONGLONG *)VA(0x1404ec718 + 0xa0) != (ULONGLONG)VA(0x140243110) || memcmp(VA(0x140578670), dof, 8)) return 0;
     near_min = n; shadow_vt = (ULONGLONG)VA(0x1404ec718);
+    /* Depth of field linearizes depth with its own fixed near/far (1 / 8500, at 140578670, used only by
+       its two initializations), tuned for the cameras' 0.1: its near is scaled the same way, or close
+       objects would look closer than they are and get blurred. */
+    dn = 1.0f * (n > 0.1f ? n : 0.1f) / 0.1f;
+    put(VA(0x140578670), &dn, 4);
     return call_at(0x1402430d0, near_stub, 8) && call_at(0x140243110, near_stub, 8);
 }
 
