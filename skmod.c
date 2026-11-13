@@ -9,12 +9,13 @@
 #include <dxgi.h>
 #include <d3d11.h>
 #include "version.h"
+#include "mipshader.h"
 
 #define VA(x) (base + ((x) - 0x140000000ULL))
 static BYTE *base;
 static char dir[MAX_PATH], ini[MAX_PATH], logbuf[16384];
 static CRITICAL_SECTION log_cs;
-static volatile LONG tex_count, tex_mipped, tex_failed;   /* MipFix counters, written with the log */
+static volatile LONG tex_count, tex_mipped, tex_failed, ps_mip, ps_mip_failed;   /* MipFix counters, written with the log */
 
 static int opt(const char *key, int def) { return GetPrivateProfileIntA("SKMod", key, def, ini); }
 
@@ -33,6 +34,7 @@ static void save_log(void) {
     if (!fopen_s(&f, path, "w")) {
         fputs(logbuf, f);
         if (tex_count) fprintf(f, "Textures so far: %ld loaded, %ld got mipmaps (MipFix), %ld failed and kept as shipped\n", tex_count, tex_mipped, tex_failed);
+        if (ps_mip || ps_mip_failed) fprintf(f, "Material shaders so far: %ld set to use mipmaps (MipFix), %ld refused and kept original\n", ps_mip, ps_mip_failed);
         fclose(f);
     }
     LeaveCriticalSection(&log_cs);
@@ -267,10 +269,16 @@ static int aoblur_on;
 
 static HRESULT STDMETHODCALLTYPE ps_hook(ID3D11Device *dev, const void *code, SIZE_T len, ID3D11ClassLinkage *cl, ID3D11PixelShader **ps) {
     const BYTE *aocp = VA(0x1404d28e0);
-    if (code && len == *(DWORD *)(aocp + 24) && !memcmp(code, aocp, len)) {
+    BYTE *p; int k; HRESULT r;
+    if (code && tex_orig && (p = mip_shader_patch((const BYTE *)code, len, &k))) {   /* MipFix, mipshader.h */
+        r = ps_orig(dev, p, *(DWORD *)(p + 24), cl, ps); free(p);
+        if (SUCCEEDED(r)) { InterlockedIncrement(&ps_mip); return r; }
+        InterlockedIncrement(&ps_mip_failed);                                     /* the original shader then */
+    }
+    if (aoblur_on && code && len == *(DWORD *)(aocp + 24) && !memcmp(code, aocp, len)) {
         HMODULE m = LoadLibraryA("d3dcompiler_47.dll");
         CompileFn compile = m ? (CompileFn)GetProcAddress(m, "D3DCompile") : 0;
-        ID3DBlob *b = 0, *err = 0; HRESULT r = E_FAIL;
+        ID3DBlob *b = 0, *err = 0; r = E_FAIL;
         if (compile && SUCCEEDED(compile(aocp_hlsl, sizeof aocp_hlsl - 1, "aoblur", 0, 0, "main", "ps_4_0", 0, 0, &b, &err)))
             r = ps_orig(dev, ID3D10Blob_GetBufferPointer(b), ID3D10Blob_GetBufferSize(b), cl, ps);
         say("AOBlur: SSAO composite shader %s\n", SUCCEEDED(r) ? "replaced (AO blurred)" : "NOT replaced (compile failed), original kept");
@@ -293,7 +301,7 @@ static HRESULT WINAPI dev_hook(IDXGIAdapter *ad, D3D_DRIVER_TYPE type, HMODULE s
     if (SUCCEEDED(r) && dev && *dev) {
         if (aniso_level)
             hook_slot(*(void ***)*dev, 23, (void *)ss_hook, (void **)&ss_orig);      /* CreateSamplerState */
-        if (aoblur_on)
+        if (aoblur_on || tex_orig)
             hook_slot(*(void ***)*dev, 15, (void *)ps_hook, (void **)&ps_orig);      /* CreatePixelShader */
         if (res_w && sc && *sc) {
             hook_slot(*(void ***)*sc, 10, (void *)setfs_hook, (void **)&setfs_orig);  /* SetFullscreenState */
