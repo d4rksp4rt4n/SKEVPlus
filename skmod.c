@@ -121,6 +121,24 @@ static int fix_shadow(int res) {
     return 1;
 }
 
+/* ---- NearClip: the cameras use near 0.1 / far 10000 with a 24-bit depth buffer. The menu and many
+   in-game views are telephoto shots from ~35 m, where depth can only tell surfaces apart ~0.7 mm or
+   more apart: swimsuits and clothes sitting on the body z-fight with it (flickering skin-coloured
+   blotches; seen with a RenderDoc pixel history). Depth precision grows with the near distance, so
+   view cameras get at least NearClip. Tamlib::CCamera SetNear (1402430d0) and SetNearFar (140243110)
+   are the only setters; shadow cameras are excluded (stubs.asm, near_stub). ---- */
+void near_stub(void);
+float near_min;
+ULONGLONG shadow_vt;
+
+static int fix_near(float n) {
+    static const char first[] = "\xf3\x0f\x10\x81\x60\x02\x00\x00";      /* movss xmm0, [rcx+260h] */
+    if (!is(0x1402430d0, first, 8) || !is(0x140243110, first, 8) ||          /* + CShadowCamera vtable check */
+        *(ULONGLONG *)VA(0x1404ec718 + 0xa0) != (ULONGLONG)VA(0x140243110)) return 0;
+    near_min = n; shadow_vt = (ULONGLONG)VA(0x1404ec718);
+    return call_at(0x1402430d0, near_stub, 8) && call_at(0x140243110, near_stub, 8);
+}
+
 /* ---- MaxResolution: fullscreen always used the monitor size for the back buffer. Both places that
    set the fullscreen size (startup, applying the screen mode incl. alt-tab) use MaxResolution
    instead; the display mode is switched to it (IDXGISwapChain::ResizeTarget), where DSR/VSR takes
@@ -364,6 +382,13 @@ static void install(HMODULE self) {
     v = opt("AOBlur", 1);
     aoblur_on = v && !memcmp(VA(0x1404d28e0), "DXBC", 4) && *(DWORD *)VA(0x1404d28f8) < 4096;
     say("AOBlur=%d: %s\n", v, !v ? "off" : aoblur_on ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
+    GetPrivateProfileStringA("SKMod", "NearClip", "0", s, sizeof s, ini);
+    {
+        float n = (float)atof(s);
+        if (n <= 0) say("NearClip=0: off\n");
+        else if (n < 0.01f || n > 2.0f) say("NearClip=%s: SKIPPED - must be 0 or 0.01..2\n", s);
+        else say("NearClip=%.2f: %s\n", n, fix_near(n) ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
+    }
     v = opt("ShadowResolution", 1536);
     if (v >= 512 && v <= 8192) say("ShadowResolution=%d: %s\n", v, fix_shadow(v) ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
     else say("ShadowResolution=%d: SKIPPED - must be 512..8192\n", v);
