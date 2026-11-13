@@ -4,19 +4,34 @@ EXTERN g_scene:QWORD, g_flag:QWORD, g_app:QWORD, res_w:DWORD, res_h:DWORD, fov_r
 EXTERN g_frametime:QWORD
 .code
 
-; FrameRate: model instances advance their object animation (moving props, sea, sky...) by a fixed
-; speed per frame (+64h, 1.0) while the material animation speed already follows the frame time.
-; Replaces "movss xmm1, [rbx+64h]; addss xmm1, [rbx+60h]" (frame + speed) with
-; frame + speed * min(frame time, 1): unchanged at 60 fps and below.
-obj_adv PROC
-    movss xmm1, dword ptr [rbx + 64h]
+; FrameRate: model instances advance their object animation (frame +60h += speed +64h) and material
+; animation (frame +80h += speed +84h) once per frame. Some callers set the speed from the frame time
+; every frame; where it is still the default 1.0 (e.g. the sea's scrolling material, props) it is
+; scaled by min(frame time, 1): unchanged at 60 fps and below, never applied twice.
+; xmm1 = scaled speed (xmm0 is free here; xmm2 must stay 0 for the game).
+scale_speed PROC
+    ucomiss xmm1, dword ptr one_f
+    jne keep
+    jp keep
     mov r11, g_frametime
     movss xmm0, dword ptr [r11]
     minss xmm0, dword ptr one_f
     mulss xmm1, xmm0
+keep:
+    ret
+scale_speed ENDP
+
+obj_adv PROC                        ; replaces movss xmm1, [rbx+64h]; addss xmm1, [rbx+60h]
+    movss xmm1, dword ptr [rbx + 64h]
+    call scale_speed
     addss xmm1, dword ptr [rbx + 60h]
     ret
 obj_adv ENDP
+
+mat_adv PROC                        ; replaces movss xmm1, [rbx+84h]
+    movss xmm1, dword ptr [rbx + 84h]
+    jmp scale_speed
+mat_adv ENDP
 
 ; SkipIntro=1, replaces "mov [scene], 4" (CTaskFirstCheck -> Marvelous movie): go where the CRI logo
 ; would go after the logos: OP movie (9) once the prologue was seen, else the prologue (10).

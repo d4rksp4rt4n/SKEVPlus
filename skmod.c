@@ -100,9 +100,11 @@ static int fix_intro(int mode) {
 /* ---- FrameRate: the in-game 30/60 setting picks from {15,20,30,60}; after Present a busy-wait limiter
    holds that rate. The game advances by the measured frame time in 1/60 s units (so 30 fps runs at
    the right speed), but clamped to >= 1, which would speed everything up above 60 fps.
-   Model instances advance their object animation by a fixed 1.0 per frame (measured with TraceAnim:
-   material players step 0.5 at 120 fps, object players 1.0); obj_adv scales that by the frame time. ---- */
-void obj_adv(void);
+   Model instances advance their object and material animations by a fixed default speed of 1.0 per
+   frame unless a caller sets it from the frame time (measured with TraceAnim/TraceSea: the menu sea
+   scrolled 0.0465/s at 120 fps vs 0.0235/s at 60). obj_adv/mat_adv scale a default speed by the
+   frame time (stubs.asm). ---- */
+void obj_adv(void), mat_adv(void);
 ULONGLONG g_frametime;
 
 static int fix_fps(int f) {
@@ -110,13 +112,14 @@ static int fix_fps(int f) {
     int t[2];
     if (memcmp(VA(0x140573af0), orig, sizeof orig) || !is(0x14026ccc2, "\x77\x04\x41\x0f\x28\xc9", 6) ||
         !is(0x14026ccb0, "\x41\x0f\x2f\xc9", 4) || !is(0x14026ccd2, "\xf3\x0f\x11\x0d", 4) ||
-        !is(0x14004120d, "\xf3\x0f\x10\x4b\x64\xf3\x0f\x58\x4b\x60", 10)) return 0;
+        !is(0x14004120d, "\xf3\x0f\x10\x4b\x64\xf3\x0f\x58\x4b\x60", 10) ||
+        !is(0x140041240, "\xf3\x0f\x10\x8b\x84\x00\x00\x00\x48\x8b\x43\x78", 12)) return 0;
     if (f == 60) return 1;
     t[0] = f / 2; t[1] = f;
     put(VA(0x140573af8), t, sizeof t);
     put(VA(0x14026ccc2), "\xeb", 1);                       /* frame time below 1/60 s is kept */
     g_frametime = (ULONGLONG)rip_target(0x14026ccd2, 4, 8);   /* where the limiter stores it */
-    return call_at(0x14004120d, obj_adv, 10);
+    return call_at(0x14004120d, obj_adv, 10) && call_at(0x140041240, mat_adv, 8);
 }
 
 /* ---- ShadowResolution: the shadows are Tamlib::CShadowVsmBlurCascade (variance shadow maps, blurred,
@@ -389,19 +392,28 @@ static BYTE *trace_addr; static DWORD trace_tid; static float trace_prev;
 static struct { void *player; float frame; } seen[64]; static int nseen, nwrites;
 static ULONGLONG wrote_at[16]; static int nwrote;
 
+static BYTE *watch[4]; static int nwatch;               /* up to 4 hardware write breakpoints */
 static LONG CALLBACK trace_veh(EXCEPTION_POINTERS *e) {
-    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(e->ContextRecord->Dr6 & 1)) return EXCEPTION_CONTINUE_SEARCH;
+    DWORD64 hit = e->ContextRecord->Dr6 & 15;
+    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !hit) return EXCEPTION_CONTINUE_SEARCH;
     e->ContextRecord->Dr6 = 0;
     if (nwrites < 400) {
         ULONGLONG rip = (ULONGLONG)((BYTE *)e->ExceptionRecord->ExceptionAddress - base) + 0x140000000ULL;
-        float now = *(float *)trace_addr; int i;
-        for (i = 0; i < nwrote && wrote_at[i] != rip; i++);
+        int w = hit & 1 ? 0 : hit & 2 ? 1 : hit & 4 ? 2 : 3, i;
+        float now = *(float *)watch[w];
+        for (i = 0; i < nwrote && wrote_at[i] != rip + w; i++);
         if (i == nwrote && nwrote < 16) {
-            wrote_at[nwrote++] = rip;
-            say("TraceAnim: frame written by the instruction before %llx: %g -> %g (step %g)\n", rip, trace_prev, now, now - trace_prev);
+            ULONGLONG *sp = (ULONGLONG *)e->ContextRecord->Rsp; int k, shown = 0;
+            wrote_at[nwrote++] = rip + w;
+            say("Trace: watch %d (%p) = %g, written before %llx; exe return addresses:", w, watch[w], now, rip);
+            for (k = 0; k < 96 && shown < 4; k++)            /* game code on the stack (caller chain) */
+                if (sp[k] > (ULONGLONG)base + 0x1000 && sp[k] < (ULONGLONG)base + 0x346000) {
+                    say(" %llx", sp[k] - (ULONGLONG)base + 0x140000000ULL); shown++;
+                }
+            say("\n");
             save_log();
         }
-        trace_prev = now; nwrites++;
+        nwrites++;
     }
     return EXCEPTION_CONTINUE_EXECUTION;
 }
@@ -418,7 +430,11 @@ static DWORD WINAPI set_watch(LPVOID p) {                  /* DR0 on every threa
         SuspendThread(t);
         ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
         if (GetThreadContext(t, &ctx)) {
-            ctx.Dr0 = (DWORD64)trace_addr; ctx.Dr7 = 1 | (1 << 16) | (3 << 18);   /* L0, write, 4 bytes */
+            DWORD64 *dr = &ctx.Dr0; int i;
+            ctx.Dr7 = 0;
+            for (i = 0; i < nwatch; i++) {                  /* Li enable, RW = write, LEN = 4 bytes */
+                dr[i] = (DWORD64)watch[i]; ctx.Dr7 |= (1ULL << (2 * i)) | (1ULL << (16 + 4 * i)) | (3ULL << (18 + 4 * i));
+            }
             SetThreadContext(t, &ctx);
         }
         ResumeThread(t); CloseHandle(t);
@@ -430,8 +446,10 @@ static DWORD WINAPI set_watch(LPVOID p) {                  /* DR0 on every threa
 /* per player: last frame and the step seen; after ~600 evaluations the steps are logged and a player
    stepping >= 0.9 per evaluation (60 fps speed at 120 fps) is watched, else the first moving one */
 static float seen_step[64]; static int nevals;
+static int trace_sea_on;
 static void record(BYTE *player) {
     int i; float f = *(float *)(player + 0x10);
+    if (trace_sea_on) return;
     if (!trace_addr) {
         for (i = 0; i < nseen && seen[i].player != player; i++);
         if (i == nseen && nseen < 64) { seen[nseen].player = player; seen[nseen++].frame = f; }
@@ -447,7 +465,7 @@ static void record(BYTE *player) {
             }
             for (i = 0; i < nseen && pick < 0; i++) if (seen_step[i] > 0) pick = i;
             if (pick >= 0) {
-                trace_addr = (BYTE *)seen[pick].player + 0x10; trace_prev = *(float *)trace_addr;
+                trace_addr = watch[0] = (BYTE *)seen[pick].player + 0x10; nwatch = 1;
                 say("TraceAnim: watching player %p\n", seen[pick].player);
                 AddVectoredExceptionHandler(1, trace_veh);
                 CloseHandle(CreateThread(0, 0, set_watch, 0, 0, 0));
@@ -459,7 +477,24 @@ static void record(BYTE *player) {
 
 typedef void(__fastcall *Eval4)(BYTE *, void *, void *, void *);
 static Eval4 mat_tramp, obj_tramp;
-static void __fastcall mat_hook(BYTE *p, void *a, void *b, void *c) { record(p); mat_tramp(p, a, b, c); }
+static BYTE *sea_player; static float sea_frame;
+static void __fastcall mat_hook(BYTE *p, void *a, void *b, void *c) {
+    float *mp = (float *)VA(0x140eeac30);                /* m_Param[1] in the global parameter block */
+    float before = mp[1];
+    record(p); mat_tramp(p, a, b, c);
+    if (!sea_player && mp[1] != before && mp[1] != 0 && fabsf(mp[1] - 10 * mp[0]) < 1e-4f && fabsf(mp[3] - 2 * mp[1]) < 1e-4f) {
+        sea_player = p; sea_frame = *(float *)(p + 0x10);
+        say("TraceSea: sea material player %p, frame %g, param %g\n", p, sea_frame, mp[1]); save_log();
+    } else if (p == sea_player && !nwatch) {
+        float f = *(float *)(p + 0x10);
+        if (f != sea_frame) {
+            say("TraceSea: sea player frame step %g; watching it\n", f - sea_frame);
+            watch[nwatch++] = p + 0x10; save_log();
+            AddVectoredExceptionHandler(1, trace_veh);
+            CloseHandle(CreateThread(0, 0, set_watch, 0, 0, 0));
+        }
+    }
+}
 static void __fastcall obj_hook(BYTE *p, void *a, void *b, void *c) { record(p); obj_tramp(p, a, b, c); }
 
 static int detour(ULONGLONG va, const char *orig, int n, void *hook, Eval4 *tramp) {   /* n whole instructions */
@@ -474,6 +509,71 @@ static int detour(ULONGLONG va, const char *orig, int n, void *hook, Eval4 *tram
 static int trace_anim(void) {                       /* material player, object player evaluate */
     return detour(0x140268a00, "\x40\x55\x41\x54\x48\x83\xec\x48", 8, mat_hook, &mat_tramp) &&
            detour(0x1402685d0, "\x40\x53\x48\x81\xec\xb0\x00\x00\x00", 9, obj_hook, &obj_tramp);
+}
+
+/* TraceSea (debug): 45 s after start, scans the heap for the sea material's parameters
+   (m_Param[0] = 100, .5, .5, 0; m_Param[1] = x, 10x, -x, 20x, seen in RenderDoc) and watches
+   m_Param[1].y with the hardware breakpoint, logging the code that scrolls it. */
+static float sea_value(void) {                            /* newest copy of the sea scroll, 0 if none */
+    MEMORY_BASIC_INFORMATION mi; BYTE *a = 0; float best = 0;
+    while (VirtualQuery(a, &mi, sizeof mi) == sizeof mi) {
+        if (mi.State == MEM_COMMIT && mi.Type == MEM_PRIVATE && (mi.Protect & PAGE_READWRITE) && !(mi.Protect & PAGE_GUARD)) {
+            float *f = (float *)mi.BaseAddress, *e = (float *)((BYTE *)mi.BaseAddress + mi.RegionSize) - 8;
+            for (; f < e; f++)
+                if (f[0] == 100.0f && f[1] == 0.5f && f[2] == 0.5f && f[3] == 0.0f && f[5] != 0 &&
+                    fabsf(f[5] - 10 * f[4]) < 1e-4f && fabsf(f[6] + f[4]) < 1e-5f && fabsf(f[7] - 2 * f[5]) < 1e-4f &&
+                    (best == 0 || f[5] < best)) best = f[5];            /* it decreases: newest = smallest */
+        }
+        a = (BYTE *)mi.BaseAddress + mi.RegionSize;
+    }
+    return best;
+}
+
+static DWORD WINAPI sea_scan(LPVOID p) {
+    MEMORY_BASIC_INFORMATION mi; BYTE *a = 0; int found = 0;
+    LARGE_INTEGER t0, t1, fq; float s0, s1;
+    Sleep(45000);
+    QueryPerformanceFrequency(&fq);
+    QueryPerformanceCounter(&t0); s0 = sea_value();
+    Sleep(10000);
+    QueryPerformanceCounter(&t1); s1 = sea_value();
+    say("TraceSea: scroll %g -> %g in %.2f s = %g per second\n", s0, s1, (double)(t1.QuadPart - t0.QuadPart) / fq.QuadPart,
+        (s1 - s0) / ((double)(t1.QuadPart - t0.QuadPart) / fq.QuadPart));
+    save_log();
+    {   /* the material parameter queue (count at 140d0ff90, then {int index; float value}[32]) */
+        int *q = (int *)VA(0x140d0ff90), tries, k;
+        int logged = 0;
+        for (tries = 0; tries < 200000 && !nwatch; tries++, (tries & 63) ? 0 : Sleep(0))
+            for (k = 0; k < q[0] && k < 32; k++) {
+                int *en = q + 1 + 2 * k; float v = *(float *)(en + 1);
+                if (en[0] >= 4 && en[0] <= 7 && logged < 24) { say("TraceSea: queue[%d] = param %d: %g\n", k, en[0], v); logged++; }
+                if (en[0] == 5 && v < -0.3f && v > -3.0f) {
+                    watch[nwatch++] = (BYTE *)(en + 1);
+                    say("TraceSea: watching queue slot %d (param 5 = %g)\n", k, v);
+                    break;
+                }
+            }
+        save_log();
+        if (nwatch) { AddVectoredExceptionHandler(1, trace_veh); set_watch(0); }
+    }
+    return 0;
+    while (VirtualQuery(a, &mi, sizeof mi) == sizeof mi) {
+        if (mi.State == MEM_COMMIT && mi.Type == MEM_PRIVATE && (mi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) &&
+            !(mi.Protect & PAGE_GUARD)) {
+            float *f = (float *)mi.BaseAddress, *e = (float *)((BYTE *)mi.BaseAddress + mi.RegionSize) - 8;
+            for (; f < e; f++)
+                if (f[0] == 100.0f && f[1] == 0.5f && f[2] == 0.5f && f[3] == 0.0f && f[5] != 0 &&
+                    fabsf(f[5] - 10 * f[4]) < 1e-4f && fabsf(f[6] + f[4]) < 1e-5f && fabsf(f[7] - 2 * f[5]) < 1e-4f) {
+                    say("TraceSea: sea params at %p: %g %g %g %g\n", f + 4, f[4], f[5], f[6], f[7]);
+                    if (nwatch < 4) watch[nwatch++] = (BYTE *)(f + 5);
+                    found++;
+                }
+        }
+        a = (BYTE *)mi.BaseAddress + mi.RegionSize;
+    }
+    say("TraceSea: scan done, %d found, watching %d\n", found, nwatch); save_log();
+    if (nwatch) { AddVectoredExceptionHandler(1, trace_veh); set_watch(0); }
+    return 0;
 }
 
 /* ---- startup ---- */
@@ -497,6 +597,7 @@ static void install(HMODULE self) {
     if (v >= 0 && v <= 16) { aniso_level = v; say("Anisotropy=%d: %s\n", v, v ? "on" : "off"); }
     else say("Anisotropy=%d: SKIPPED - must be 0..16\n", v);
     if (opt("TraceAnim", 0)) say("TraceAnim: %s\n", trace_anim() ? "on (debug)" : "SKIPPED - unexpected exe bytes");
+    if ((trace_sea_on = opt("TraceSea", 0))) { trace_anim(); CloseHandle(CreateThread(0, 0, sea_scan, 0, 0, 0)); }
     v = opt("SkipIntro", 2);
     if (v >= 0 && v <= 2) report("SkipIntro", v, fix_intro(v)); else say("SkipIntro=%d: SKIPPED - must be 0..2\n", v);
     v = opt("ShadowNoiseFix", 5);
