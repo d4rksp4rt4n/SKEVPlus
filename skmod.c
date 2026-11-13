@@ -9,13 +9,12 @@
 #include <dxgi.h>
 #include <d3d11.h>
 #include "version.h"
-#include "evsm.h"
 
 #define VA(x) (base + ((x) - 0x140000000ULL))
 static BYTE *base;
 static char dir[MAX_PATH], ini[MAX_PATH], logbuf[16384];
 static CRITICAL_SECTION log_cs;
-static volatile LONG tex_count, tex_mipped, tex_failed, ps_patched, ps_failed;   /* counters written with the log */
+static volatile LONG tex_count, tex_mipped, tex_failed;   /* MipFix counters, written with the log */
 
 static int opt(const char *key, int def) { return GetPrivateProfileIntA("SKMod", key, def, ini); }
 
@@ -34,7 +33,6 @@ static void save_log(void) {
     if (!fopen_s(&f, path, "w")) {
         fputs(logbuf, f);
         if (tex_count) fprintf(f, "Textures so far: %ld loaded, %ld got mipmaps (MipFix), %ld failed and kept as shipped\n", tex_count, tex_mipped, tex_failed);
-        if (ps_patched || ps_failed) fprintf(f, "Shadow shaders so far: %ld patched (ShadowNoiseFix), %ld refused and kept original\n", ps_patched, ps_failed);
         fclose(f);
     }
     LeaveCriticalSection(&log_cs);
@@ -246,21 +244,6 @@ typedef HRESULT(WINAPI *CreateDevSC)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, U
                                      ID3D11DeviceContext **);
 static CreateDevSC dev_orig;
 
-/* ---- ShadowNoiseFix (evsm.h): shadow receiver pixel shaders get a minimum variance ---- */
-typedef HRESULT(STDMETHODCALLTYPE *CreatePS)(ID3D11Device *, const void *, SIZE_T, ID3D11ClassLinkage *, ID3D11PixelShader **);
-static CreatePS ps_orig;
-static float evsm_k;
-
-static HRESULT STDMETHODCALLTYPE ps_hook(ID3D11Device *dev, const void *code, SIZE_T len, ID3D11ClassLinkage *cl, ID3D11PixelShader **ps) {
-    DWORD n; BYTE *p = code ? evsm_patch((const BYTE *)code, len, evsm_k, &n) : 0; HRESULT r;
-    if (p) {
-        r = ps_orig(dev, p, n, cl, ps); free(p);
-        if (SUCCEEDED(r)) { InterlockedIncrement(&ps_patched); return r; }
-        InterlockedIncrement(&ps_failed);                   /* the original shader then */
-    }
-    return ps_orig(dev, code, len, cl, ps);
-}
-
 static void hook_slot(void **vt, int i, void *hook, void **orig) {
     if (vt[i] != hook) { *orig = vt[i]; put(&vt[i], &hook, sizeof hook); }
 }
@@ -272,8 +255,6 @@ static HRESULT WINAPI dev_hook(IDXGIAdapter *ad, D3D_DRIVER_TYPE type, HMODULE s
     if (SUCCEEDED(r) && dev && *dev) {
         if (aniso_level)
             hook_slot(*(void ***)*dev, 23, (void *)ss_hook, (void **)&ss_orig);      /* CreateSamplerState */
-        if (evsm_k > 0)
-            hook_slot(*(void ***)*dev, 15, (void *)ps_hook, (void **)&ps_orig);      /* CreatePixelShader */
         if (res_w && sc && *sc) {
             hook_slot(*(void ***)*sc, 10, (void *)setfs_hook, (void **)&setfs_orig);  /* SetFullscreenState */
             hook_slot(*(void ***)*sc, 13, (void *)rb_hook, (void **)&rb_orig);        /* ResizeBuffers */
@@ -323,9 +304,6 @@ static void install(HMODULE self) {
     else say("Anisotropy=%d: SKIPPED - must be 0..16\n", v);
     v = opt("SkipIntro", 2);
     if (v >= 0 && v <= 2) report("SkipIntro", v, fix_intro(v)); else say("SkipIntro=%d: SKIPPED - must be 0..2\n", v);
-    v = opt("ShadowNoiseFix", 5);
-    if (v >= 0 && v <= 9) { evsm_k = v ? powf(10.0f, -(float)v) : 0; say("ShadowNoiseFix=%d: %s\n", v, v ? "on" : "off"); }
-    else say("ShadowNoiseFix=%d: SKIPPED - must be 0..9\n", v);
     v = opt("ShadowResolution", 1536);
     if (v >= 512 && v <= 8192) say("ShadowResolution=%d: %s\n", v, fix_shadow(v) ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
     else say("ShadowResolution=%d: SKIPPED - must be 512..8192\n", v);
