@@ -10,6 +10,7 @@
 #include <d3d11.h>
 #include "version.h"
 #include "mipshader.h"
+#include "evsm.h"
 
 #define VA(x) (base + ((x) - 0x140000000ULL))
 static BYTE *base;
@@ -34,7 +35,7 @@ static void save_log(void) {
     if (!fopen_s(&f, path, "w")) {
         fputs(logbuf, f);
         if (tex_count) fprintf(f, "Textures so far: %ld loaded, %ld got mipmaps (MipFix), %ld failed and kept as shipped\n", tex_count, tex_mipped, tex_failed);
-        if (ps_mip || ps_mip_failed) fprintf(f, "Material shaders so far: %ld set to use mipmaps (MipFix), %ld refused and kept original\n", ps_mip, ps_mip_failed);
+        if (ps_mip || ps_mip_failed) fprintf(f, "Material shaders so far: %ld patched (MipFix/ShadowNoiseFix), %ld refused and kept original\n", ps_mip, ps_mip_failed);
         fclose(f);
     }
     LeaveCriticalSection(&log_cs);
@@ -266,11 +267,16 @@ typedef HRESULT(WINAPI *CompileFn)(const void *, SIZE_T, const char *, const voi
 typedef HRESULT(STDMETHODCALLTYPE *CreatePS)(ID3D11Device *, const void *, SIZE_T, ID3D11ClassLinkage *, ID3D11PixelShader **);
 static CreatePS ps_orig;
 static int aoblur_on;
+static float evsm_k;
 
 static HRESULT STDMETHODCALLTYPE ps_hook(ID3D11Device *dev, const void *code, SIZE_T len, ID3D11ClassLinkage *cl, ID3D11PixelShader **ps) {
     const BYTE *aocp = VA(0x1404d28e0);
-    BYTE *p; int k; HRESULT r;
-    if (code && tex_orig && (p = mip_shader_patch((const BYTE *)code, len, &k))) {   /* MipFix, mipshader.h */
+    BYTE *p = 0, *e = 0; int k = 0; DWORD el; HRESULT r;
+    if (code && evsm_k > 0) e = evsm_patch((const BYTE *)code, len, evsm_k, &el);   /* ShadowNoiseFix, evsm.h */
+    if (code && tex_orig) p = mip_shader_patch(e ? e : (const BYTE *)code, e ? el : len, &k);   /* MipFix, mipshader.h */
+    if (!p) { p = e; e = 0; }
+    free(e);
+    if (p) {
         r = ps_orig(dev, p, *(DWORD *)(p + 24), cl, ps); free(p);
         if (SUCCEEDED(r)) { InterlockedIncrement(&ps_mip); return r; }
         InterlockedIncrement(&ps_mip_failed);                                     /* the original shader then */
@@ -301,7 +307,7 @@ static HRESULT WINAPI dev_hook(IDXGIAdapter *ad, D3D_DRIVER_TYPE type, HMODULE s
     if (SUCCEEDED(r) && dev && *dev) {
         if (aniso_level)
             hook_slot(*(void ***)*dev, 23, (void *)ss_hook, (void **)&ss_orig);      /* CreateSamplerState */
-        if (aoblur_on || tex_orig)
+        if (aoblur_on || tex_orig || evsm_k > 0)
             hook_slot(*(void ***)*dev, 15, (void *)ps_hook, (void **)&ps_orig);      /* CreatePixelShader */
         if (res_w && sc && *sc) {
             hook_slot(*(void ***)*sc, 10, (void *)setfs_hook, (void **)&setfs_orig);  /* SetFullscreenState */
@@ -352,6 +358,9 @@ static void install(HMODULE self) {
     else say("Anisotropy=%d: SKIPPED - must be 0..16\n", v);
     v = opt("SkipIntro", 2);
     if (v >= 0 && v <= 2) report("SkipIntro", v, fix_intro(v)); else say("SkipIntro=%d: SKIPPED - must be 0..2\n", v);
+    v = opt("ShadowNoiseFix", 5);
+    if (v >= 0 && v <= 9) { evsm_k = v ? powf(10.0f, -(float)v) : 0; say("ShadowNoiseFix=%d: %s\n", v, v ? "on" : "off"); }
+    else say("ShadowNoiseFix=%d: SKIPPED - must be 0..9\n", v);
     v = opt("AOBlur", 1);
     aoblur_on = v && !memcmp(VA(0x1404d28e0), "DXBC", 4) && *(DWORD *)VA(0x1404d28f8) < 4096;
     say("AOBlur=%d: %s\n", v, !v ? "off" : aoblur_on ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
