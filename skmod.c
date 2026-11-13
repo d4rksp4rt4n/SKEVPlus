@@ -109,6 +109,15 @@ static int fix_fps(int f) {
     return 1;
 }
 
+/* ---- ShadowResolution: the shadows are Tamlib::CShadowVsmBlurCascade (variance shadow maps, blurred,
+   cascaded), created once as 1536x1536 ('mov edx, 600h' before its init call); every target and
+   viewport takes the size from there. A bigger map = smaller texels = less crawling/grain. ---- */
+static int fix_shadow(int res) {
+    if (!is(0x140045716, "\xba\x00\x06\x00\x00\x44\x8b\xc2", 8)) return 0;
+    if (res != 1536) put(VA(0x140045717), &res, 4);
+    return 1;
+}
+
 /* ---- MaxResolution: fullscreen always used the monitor size for the back buffer. Both places that
    set the fullscreen size (startup, applying the screen mode incl. alt-tab) use MaxResolution
    instead; the display mode is switched to it (IDXGISwapChain::ResizeTarget), where DSR/VSR takes
@@ -210,12 +219,14 @@ static InfoFn info_fn;
 static TexFn tex_orig;
 
 /* MipFix: most stage/object textures ship as single-level DDS (e.g. 3649 of the 4.6k DXT textures in
-   Model/Field), so they shimmer at a distance whatever the sampler allows. Those get a full mip chain
-   built by D3DX at load (same format; box filter). Cube maps and tiny textures are left as they are. */
+   Model/Field) or with a short chain (e.g. 4 levels on 1024px), so they shimmer at a distance whatever
+   the sampler allows. Those get a full mip chain built by D3DX at load (same format; box filter). Cube maps and tiny textures are left as they are. */
+static UINT full_mips(UINT w, UINT h) { UINT n = 1, m = w > h ? w : h; while (m > 1) { m >>= 1; n++; } return n; }
+
 static HRESULT WINAPI tex_hook(ID3D11Device *dev, const void *src, SIZE_T n, LoadInfo *li, void *pump, ID3D11Resource **tex, HRESULT *hr2) {
     ImgInfo ii; HRESULT r;
     InterlockedIncrement(&tex_count);
-    if (!li && SUCCEEDED(info_fn(src, n, 0, &ii, 0)) && ii.MipLevels == 1 && ii.ArraySize == 1 &&
+    if (!li && SUCCEEDED(info_fn(src, n, 0, &ii, 0)) && ii.MipLevels < full_mips(ii.Width, ii.Height) - 2 && ii.ArraySize == 1 &&
         ii.ResourceDimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D && !(ii.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) &&
         (ii.Width >= 16 || ii.Height >= 16)) {
         LoadInfo l = {DX_FROM_FILE, DX_FROM_FILE, DX_FROM_FILE, 0, 0, (D3D11_USAGE)DX_DEFAULT, DX_DEFAULT, DX_DEFAULT,
@@ -293,6 +304,9 @@ static void install(HMODULE self) {
     else say("Anisotropy=%d: SKIPPED - must be 0..16\n", v);
     v = opt("SkipIntro", 2);
     if (v >= 0 && v <= 2) report("SkipIntro", v, fix_intro(v)); else say("SkipIntro=%d: SKIPPED - must be 0..2\n", v);
+    v = opt("ShadowResolution", 1536);
+    if (v >= 512 && v <= 8192) say("ShadowResolution=%d: %s\n", v, fix_shadow(v) ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
+    else say("ShadowResolution=%d: SKIPPED - must be 512..8192\n", v);
     v = opt("FrameRate", 60);
     if (v >= 60 && v <= 360) say("FrameRate=%d: %s\n", v, fix_fps(v) ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
     else say("FrameRate=%d: SKIPPED - must be 60..360\n", v);
