@@ -124,26 +124,31 @@ static int fix_shadow(int res) {
 /* ---- NearClip: the cameras use near 0.1 / far 10000 with a 24-bit depth buffer. The menu and many
    in-game views are telephoto shots from ~35 m, where depth can only tell surfaces apart ~0.7 mm or
    more apart: swimsuits and clothes sitting on the body z-fight with it (flickering skin-coloured
-   blotches; seen with a RenderDoc pixel history). Depth precision grows with the near distance, so
-   view cameras get at least NearClip. Tamlib::CCamera SetNear (1402430d0) and SetNearFar (140243110)
-   are the only setters; shadow cameras are excluded (stubs.asm, near_stub). ---- */
-void near_stub(void);
-float near_min;
-ULONGLONG shadow_vt;
+   blotches; seen with a RenderDoc pixel history). Depth precision grows with the near distance; a
+   fixed higher near cut close-ups, so it follows the zoom instead: the getters GetNear (140243150)
+   and GetNearFar (140243170), which every consumer uses, return near * clamp(40deg / fov, 1, NearClip).
+   Normal shots keep 0.1; the 4.6deg menu telephoto gets ~0.87. Depth of field's own fixed near
+   (global 140e51270, tuned for 0.1) gets the same factor. Shadow cameras are excluded (stubs.asm). ---- */
+void near_get(void), near_getpair(void);
+float fov_ref = 0.6981317f, near_max, one_f = 1.0f;
+ULONGLONG shadow_vt, g_dofnear;
 
-static int fix_near(float n) {
-    static const char first[] = "\xf3\x0f\x10\x81\x60\x02\x00\x00";      /* movss xmm0, [rcx+260h] */
-    static const float dof[2] = {1.0f, 8500.0f};
-    float dn;
-    if (!is(0x1402430d0, first, 8) || !is(0x140243110, first, 8) ||          /* + CShadowCamera vtable check */
-        *(ULONGLONG *)VA(0x1404ec718 + 0xa0) != (ULONGLONG)VA(0x140243110) || memcmp(VA(0x140578670), dof, 8)) return 0;
-    near_min = n; shadow_vt = (ULONGLONG)VA(0x1404ec718);
-    /* Depth of field linearizes depth with its own fixed near/far (1 / 8500, at 140578670, used only by
-       its two initializations), tuned for the cameras' 0.1: its near is scaled the same way, or close
-       objects would look closer than they are and get blurred. */
-    dn = 1.0f * (n > 0.1f ? n : 0.1f) / 0.1f;
-    put(VA(0x140578670), &dn, 4);
-    return call_at(0x1402430d0, near_stub, 8) && call_at(0x140243110, near_stub, 8);
+static int jmp_at(ULONGLONG va, void *fn) {
+    BYTE b[5], *p = VA(va), *t = near_jmp(fn);
+    if (!t) return 0;
+    b[0] = 0xe9; *(int *)(b + 1) = (int)(t - (p + 5));
+    put(p, b, 5);
+    return 1;
+}
+
+static int fix_near(float maxscale) {
+    if (!is(0x140243150, "\xf3\x0f\x10\x81\x60\x02\x00\x00\xc3", 9) ||
+        !is(0x140243170, "\x8b\x81\x60\x02\x00\x00\x89\x02\x8b\x81\x64\x02\x00\x00\x41\x89\x00\xc3", 18) ||
+        !is(0x14026fdf4, "\xf3\x0f\x10\x1d", 4) ||
+        *(ULONGLONG *)VA(0x1404ec718 + 0xa8) != (ULONGLONG)VA(0x140243150)) return 0;   /* CShadowCamera vtable */
+    near_max = maxscale; shadow_vt = (ULONGLONG)VA(0x1404ec718);
+    g_dofnear = (ULONGLONG)rip_target(0x14026fdf4, 4, 8);
+    return jmp_at(0x140243150, near_get) && jmp_at(0x140243170, near_getpair);
 }
 
 /* ---- MaxResolution: fullscreen always used the monitor size for the back buffer. Both places that
@@ -392,9 +397,9 @@ static void install(HMODULE self) {
     GetPrivateProfileStringA("SKMod", "NearClip", "0", s, sizeof s, ini);
     {
         float n = (float)atof(s);
-        if (n <= 0) say("NearClip=0: off\n");
-        else if (n < 0.01f || n > 2.0f) say("NearClip=%s: SKIPPED - must be 0 or 0.01..2\n", s);
-        else say("NearClip=%.2f: %s\n", n, fix_near(n) ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
+        if (n <= 1) say("NearClip=%s: off\n", s);
+        else if (n > 50) say("NearClip=%s: SKIPPED - must be 0 or 2..50\n", s);
+        else say("NearClip=%.0f: %s\n", n, fix_near(n) ? "on (near grows with zoom, up to this factor)" : "SKIPPED - unexpected exe bytes (other game version?)");
     }
     v = opt("ShadowResolution", 1536);
     if (v >= 512 && v <= 8192) say("ShadowResolution=%d: %s\n", v, fix_shadow(v) ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
