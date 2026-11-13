@@ -131,7 +131,7 @@ static int fix_shadow(int res) {
    (global 140e51270, tuned for 0.1) gets the same factor. Shadow cameras are excluded (stubs.asm). ---- */
 void near_get(void), near_getpair(void);
 float fov_ref = 0.6981317f, near_max, one_f = 1.0f;
-ULONGLONG shadow_vt, g_dofnear;
+ULONGLONG shadow_vt, g_dofnear, shadow_ret[4];   /* return addresses of the shadow code's GetNear calls */
 
 static int jmp_at(ULONGLONG va, void *fn) {
     BYTE b[5], *p = VA(va), *t = near_jmp(fn);
@@ -146,6 +146,14 @@ static int fix_near(float maxscale) {
         !is(0x140243170, "\x8b\x81\x60\x02\x00\x00\x89\x02\x8b\x81\x64\x02\x00\x00\x41\x89\x00\xc3", 18) ||
         !is(0x14026fdf4, "\xf3\x0f\x10\x1d", 4) ||
         *(ULONGLONG *)VA(0x1404ec718 + 0xa8) != (ULONGLONG)VA(0x140243150)) return 0;   /* CShadowCamera vtable */
+    /* the shadow cascades are fitted to the view camera's near (CCascadeVariantShadowRender and the
+       cascade setup): they keep the original one, or close shadows would drop out */
+    static const ULONGLONG calls[4] = {0x14026003d, 0x140260192, 0x140046065, 0x140046b5f};
+    int i;
+    for (i = 0; i < 4; i++) {                                     /* call qword ptr [rax + 0a8h] */
+        if (!is(calls[i], "\xff\x90\xa8\x00\x00\x00", 6)) return 0;
+        shadow_ret[i] = (ULONGLONG)VA(calls[i] + 6);
+    }
     near_max = maxscale; shadow_vt = (ULONGLONG)VA(0x1404ec718);
     g_dofnear = (ULONGLONG)rip_target(0x14026fdf4, 4, 8);
     return jmp_at(0x140243150, near_get) && jmp_at(0x140243170, near_getpair);

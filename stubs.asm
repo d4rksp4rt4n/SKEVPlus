@@ -1,6 +1,6 @@
 ; Small x64 stubs called from the game's code (via a jump slot near the exe, see near_jmp in skmod.c).
 ; Each replaces the game instructions noted and keeps every register the game still uses there.
-EXTERN g_scene:QWORD, g_flag:QWORD, g_app:QWORD, res_w:DWORD, res_h:DWORD, fov_ref:DWORD, near_max:DWORD, one_f:DWORD, shadow_vt:QWORD, g_dofnear:QWORD
+EXTERN g_scene:QWORD, g_flag:QWORD, g_app:QWORD, res_w:DWORD, res_h:DWORD, fov_ref:DWORD, near_max:DWORD, one_f:DWORD, shadow_vt:QWORD, g_dofnear:QWORD, shadow_ret:QWORD
 .code
 
 ; SkipIntro=1, replaces "mov [scene], 4" (CTaskFirstCheck -> Marvelous movie): go where the CRI logo
@@ -50,11 +50,23 @@ res_apply ENDP
 ; NearClip: replace Tamlib::CCamera GetNear (returns xmm0) and GetNearFar (writes [rdx], [r8]); rcx =
 ; camera, +260h near, +264h far, +26Ch vertical fov (radians). For view cameras the near distance
 ; grows with the zoom: near * clamp(fov_ref / fov, 1, near_max). Depth of field uses its own fixed
-; near (1.0, tuned for the cameras' 0.1) and gets the same factor. Shadow cameras are left alone.
+; near (1.0, tuned for the cameras' 0.1) and gets the same factor. Shadow cameras, and the shadow
+; code fitting its cascades to the view camera (4 call sites, return addresses in shadow_ret), get the
+; original near.
 near_get PROC
     movss xmm0, dword ptr [rcx + 260h]
     mov rax, shadow_vt
     cmp qword ptr [rcx], rax
+    je done
+    mov rax, qword ptr [rsp]
+    lea r10, shadow_ret
+    cmp rax, qword ptr [r10]
+    je done
+    cmp rax, qword ptr [r10 + 8]
+    je done
+    cmp rax, qword ptr [r10 + 16]
+    je done
+    cmp rax, qword ptr [r10 + 24]
     je done
     movss xmm1, dword ptr fov_ref
     divss xmm1, dword ptr [rcx + 26Ch]
