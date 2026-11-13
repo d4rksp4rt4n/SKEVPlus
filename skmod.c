@@ -99,17 +99,27 @@ static int fix_intro(int mode) {
 
 /* ---- FrameRate: the in-game 30/60 setting picks from {15,20,30,60}; after Present a busy-wait limiter
    holds that rate. The game advances by the measured frame time in 1/60 s units (so 30 fps runs at
-   the right speed), but clamped to >= 1, which would speed everything up above 60 fps. ---- */
+   the right speed), but clamped to >= 1, which would speed everything up above 60 fps.
+   A second family of code (~114 functions: scripted timers, intros, finishers, transformations, water
+   and cloud scrolling) instead adds the game-speed step (global, 1.0, lower in slow motion) once per
+   frame; no function uses both. The step is scaled by the frame time (fps_stub). ---- */
+void fps_stub(void);
+ULONGLONG g_frametime, g_step;
+float step_base = 1.0f, step_last = -1.0f;
+
 static int fix_fps(int f) {
     static const int orig[4] = {15, 20, 30, 60};
     int t[2];
     if (memcmp(VA(0x140573af0), orig, sizeof orig) || !is(0x14026ccc2, "\x77\x04\x41\x0f\x28\xc9", 6) ||
-        !is(0x14026ccb0, "\x41\x0f\x2f\xc9", 4)) return 0;
+        !is(0x14026ccb0, "\x41\x0f\x2f\xc9", 4) || !is(0x14026ccd2, "\xf3\x0f\x11\x0d", 4) ||
+        !is(0x14006751f, "\xf3\x0f\x11\x0d", 4)) return 0;               /* game writing the step */
     if (f == 60) return 1;
     t[0] = f / 2; t[1] = f;
     put(VA(0x140573af8), t, sizeof t);
     put(VA(0x14026ccc2), "\xeb", 1);                       /* frame time below 1/60 s is kept */
-    return 1;
+    g_frametime = (ULONGLONG)rip_target(0x14026ccd2, 4, 8);
+    g_step = (ULONGLONG)rip_target(0x14006751f, 4, 8);
+    return call_at(0x14026ccd2, fps_stub, 8);
 }
 
 /* ---- ShadowResolution: the shadows are Tamlib::CShadowVsmBlurCascade (variance shadow maps, blurred,

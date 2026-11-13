@@ -1,7 +1,30 @@
 ; Small x64 stubs called from the game's code (via a jump slot near the exe, see near_jmp in skmod.c).
 ; Each replaces the game instructions noted and keeps every register the game still uses there.
 EXTERN g_scene:QWORD, g_flag:QWORD, g_app:QWORD, res_w:DWORD, res_h:DWORD, fov_ref:DWORD, near_max:DWORD, one_f:DWORD, shadow_vt:QWORD, g_dofnear:QWORD, shadow_ret:QWORD
+EXTERN g_frametime:QWORD, g_step:QWORD, step_base:DWORD, step_last:DWORD
 .code
+
+; FrameRate: replaces "movss [frame time], xmm1" at the end of the frame limiter (xmm1 = frame time in
+; 1/60 s units). The game-speed step (g_step, 1.0, lower in slow motion) is added once per frame by
+; scripted timers, cutscenes, scrolling water/clouds; it becomes base * min(frame time, 1), so those
+; keep their speed above 60 fps. A value the game wrote itself since last frame becomes the new base.
+; eax is still used by the game after this.
+fps_stub PROC
+    mov r11, g_frametime
+    movss dword ptr [r11], xmm1
+    mov r11, g_step
+    movss xmm0, dword ptr [r11]
+    ucomiss xmm0, dword ptr step_last
+    je same
+    movss dword ptr step_base, xmm0
+same:
+    movss xmm0, xmm1
+    minss xmm0, dword ptr one_f
+    mulss xmm0, dword ptr step_base
+    movss dword ptr [r11], xmm0
+    movss dword ptr step_last, xmm0
+    ret
+fps_stub ENDP
 
 ; SkipIntro=1, replaces "mov [scene], 4" (CTaskFirstCheck -> Marvelous movie): go where the CRI logo
 ; would go after the logos: OP movie (9) once the prologue was seen, else the prologue (10).
