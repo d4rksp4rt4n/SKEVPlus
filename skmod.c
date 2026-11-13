@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <math.h>
 #include <intrin.h>
 #include <dxgi.h>
 #include <d3d11.h>
@@ -18,6 +19,7 @@ static BYTE *base;
 static char dir[MAX_PATH], ini[MAX_PATH], logbuf[16384];
 static CRITICAL_SECTION log_cs;
 static volatile LONG tex_count, tex_mipped, tex_failed, ps_mip, ps_mip_failed;   /* MipFix counters, written with the log */
+static volatile LONG rot_wraps;                     /* FrameRate: rotation keys interpolated the short way */
 
 static int opt(const char *key, int def) { return GetPrivateProfileIntA("SKMod", key, def, ini); }
 
@@ -36,6 +38,7 @@ static void save_log(void) {
     if (!fopen_s(&f, path, "w")) {
         fputs(logbuf, f);
         if (tex_count) fprintf(f, "Textures so far: %ld loaded, %ld got mipmaps (MipFix), %ld failed and kept as shipped\n", tex_count, tex_mipped, tex_failed);
+        if (rot_wraps) fprintf(f, "Rotation keys crossing 180 deg interpolated the short way so far: %ld frames\n", rot_wraps);
         if (ps_mip || ps_mip_failed) fprintf(f, "Material shaders so far: %ld patched (MipFix/ShadowNoiseFix), %ld refused and kept original\n", ps_mip, ps_mip_failed);
         fclose(f);
     }
@@ -123,6 +126,37 @@ void obj_adv(void), mat_adv(void), ui_step(void);
 float ui_acc; int fast_menus;
 ULONGLONG g_frametime, g_wstep;                     /* g_wstep: float in the slot page (near the exe) */
 
+/* Motions (Tamlib TMO, also the TCM camera motions of finishers/menus) in the per-channel key format
+   store each rotation as 3 Euler angles (radians), interpolated linearly between keys by 14025b650.
+   An angle crossing +-180 deg between keys one frame apart (3.1 -> -3.1) interpolates through 0: at
+   60 fps only the keys are shown, above 60 the frame in between turns the other way round (a finisher
+   camera showed one frame upside down). rot_eval is that evaluator for the rotation channel (call at
+   14025baea) taking the short way between keys one frame apart; everything else is unchanged. */
+typedef struct { WORD frame, flags; float v; DWORD pad[2]; } MKey;
+static int (*key_find)(void *chan, unsigned frame, unsigned cached);   /* 14025e260 */
+
+static void rot_eval(float *out, BYTE *ch, float t) {
+    WORD *cache = (WORD *)(ch + 8);
+    BYTE *c = *(BYTE **)ch;
+    int f = (int)t, i, j, n, span;
+    for (i = 0; i < 3; i++, c += 16) {
+        MKey *k = *(MKey **)c;
+        float d;
+        n = *(WORD *)(c + 8);
+        j = key_find(c, (WORD)f, cache[i]);
+        if (j < 0) { if (n) out[i] = k[0].v; cache[i] = 0; continue; }
+        cache[i] = (WORD)j;
+        if (j == n - 1 || ((k[j].flags & 15) != 2 && (k[j].flags & 15) != 3)) { out[i] = k[j].v; continue; }
+        d = k[j + 1].v - k[j].v;
+        span = k[j + 1].frame - k[j].frame;
+        if (span == 1 && (d > 3.14159265f || d < -3.14159265f)) {
+            d -= 6.28318531f * floorf(d / 6.28318531f + 0.5f);
+            InterlockedIncrement(&rot_wraps);
+        }
+        out[i] = (t - k[j].frame) / span * d + k[j].v;
+    }
+}
+
 static int fix_fps(int f, int fast) {
     static const int orig[4] = {15, 20, 30, 60};
     static const ULONGLONG ev_step[2] = {0x1400e66ce, 0x1400e6b49};
@@ -139,10 +173,17 @@ static int fix_fps(int f, int fast) {
     if (!is(0x140214247, "\x0f\x2f\xf0\x77\x03\x0f\x28\xf0", 8)) return 0;   /* UI: comiss xmm6, xmm0; ja +3 */
     for (i = 0; i < 4; i++)                                 /* shop: movss xmmN, [rip -> frame time] */
         if (!is(shop_dt[i], "\xf3\x0f\x10", 3) || rip_target(shop_dt[i], 4, 8) != VA(0x1405c6f0c)) return 0;
+    if (!is(0x14025baea, "\xe8", 1) || rip_target(0x14025baea, 1, 5) != VA(0x14025b650) ||
+        !is(0x14025b6ba, "\xe8", 1) || rip_target(0x14025b6ba, 1, 5) != VA(0x14025e260) ||
+        !is(0x14025b650, "\x48\x89\x5c\x24\x18", 5)) return 0;
     if (f == 60) return 1;
     /* FpsParts (debug, default all): 1 menu UI step, 2 event/battle scene step, 4 library scene step,
-       8 event character step, 16 default-speed object/material animations */
-    parts = opt("FpsParts", 31);
+       8 event character step, 16 default-speed object/material animations, 32 rotation keys */
+    parts = opt("FpsParts", 63);
+    if (parts & 32) {
+        key_find = (void *)VA(0x14025e260);
+        if (!call_at(0x14025baea, rot_eval, 5)) return 0;
+    }
     fast_menus = fast;
     if (parts & 1) {                                        /* menus/UI and shop: whole steps */
         BYTE *page = near_jmp(0);                           /* any slot address = the page near the exe */
@@ -166,7 +207,7 @@ static int fix_fps(int f, int fast) {
         int d = (int)(VA(0x1405c63ac) - (VA(ev_step[i]) + 8));
         put(VA(ev_step[i] + 4), &d, 4);
     }
-    if (parts != 31) say("FpsParts=%d (debug: only some frame-rate fixes applied)\n", parts);
+    if (parts != 63) say("FpsParts=%d (debug: only some frame-rate fixes applied)\n", parts);
     return !(parts & 16) || (call_at(0x14004120d, obj_adv, 10) && call_at(0x140041240, mat_adv, 8));
 }
 
