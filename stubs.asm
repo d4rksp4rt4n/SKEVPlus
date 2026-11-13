@@ -1,7 +1,22 @@
 ; Small x64 stubs called from the game's code (via a jump slot near the exe, see near_jmp in skmod.c).
 ; Each replaces the game instructions noted and keeps every register the game still uses there.
 EXTERN g_scene:QWORD, g_flag:QWORD, g_app:QWORD, res_w:DWORD, res_h:DWORD, fov_ref:DWORD, near_max:DWORD, one_f:DWORD, shadow_vt:QWORD, g_dofnear:QWORD, shadow_ret:QWORD
+EXTERN g_frametime:QWORD
 .code
+
+; FrameRate: model instances advance their object animation (moving props, sea, sky...) by a fixed
+; speed per frame (+64h, 1.0) while the material animation speed already follows the frame time.
+; Replaces "movss xmm1, [rbx+64h]; addss xmm1, [rbx+60h]" (frame + speed) with
+; frame + speed * min(frame time, 1): unchanged at 60 fps and below.
+obj_adv PROC
+    movss xmm1, dword ptr [rbx + 64h]
+    mov r11, g_frametime
+    movss xmm0, dword ptr [r11]
+    minss xmm0, dword ptr one_f
+    mulss xmm1, xmm0
+    addss xmm1, dword ptr [rbx + 60h]
+    ret
+obj_adv ENDP
 
 ; SkipIntro=1, replaces "mov [scene], 4" (CTaskFirstCheck -> Marvelous movie): go where the CRI logo
 ; would go after the logos: OP movie (9) once the prologue was seen, else the prologue (10).

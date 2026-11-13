@@ -99,17 +99,24 @@ static int fix_intro(int mode) {
 
 /* ---- FrameRate: the in-game 30/60 setting picks from {15,20,30,60}; after Present a busy-wait limiter
    holds that rate. The game advances by the measured frame time in 1/60 s units (so 30 fps runs at
-   the right speed), but clamped to >= 1, which would speed everything up above 60 fps. ---- */
+   the right speed), but clamped to >= 1, which would speed everything up above 60 fps.
+   Model instances advance their object animation by a fixed 1.0 per frame (measured with TraceAnim:
+   material players step 0.5 at 120 fps, object players 1.0); obj_adv scales that by the frame time. ---- */
+void obj_adv(void);
+ULONGLONG g_frametime;
+
 static int fix_fps(int f) {
     static const int orig[4] = {15, 20, 30, 60};
     int t[2];
     if (memcmp(VA(0x140573af0), orig, sizeof orig) || !is(0x14026ccc2, "\x77\x04\x41\x0f\x28\xc9", 6) ||
-        !is(0x14026ccb0, "\x41\x0f\x2f\xc9", 4)) return 0;
+        !is(0x14026ccb0, "\x41\x0f\x2f\xc9", 4) || !is(0x14026ccd2, "\xf3\x0f\x11\x0d", 4) ||
+        !is(0x14004120d, "\xf3\x0f\x10\x4b\x64\xf3\x0f\x58\x4b\x60", 10)) return 0;
     if (f == 60) return 1;
     t[0] = f / 2; t[1] = f;
     put(VA(0x140573af8), t, sizeof t);
     put(VA(0x14026ccc2), "\xeb", 1);                       /* frame time below 1/60 s is kept */
-    return 1;
+    g_frametime = (ULONGLONG)rip_target(0x14026ccd2, 4, 8);   /* where the limiter stores it */
+    return call_at(0x14004120d, obj_adv, 10);
 }
 
 /* ---- ShadowResolution: the shadows are Tamlib::CShadowVsmBlurCascade (variance shadow maps, blurred,
@@ -374,6 +381,101 @@ static void **iat_slot(const char *dll, const char *func) {
     return 0;
 }
 
+/* ---- TraceAnim (debug, off by default): finds the code advancing material animations (sea/cloud
+   scrolling). Tamlib::CTmd2MatAnimePlayer's evaluate (140268a00, rcx = player, frame at +10h) is
+   detoured; the first player whose frame moves gets a hardware write breakpoint (DR0), and the
+   instructions writing it are logged with the frame step they applied. ---- */
+static BYTE *trace_addr; static DWORD trace_tid; static float trace_prev;
+static struct { void *player; float frame; } seen[64]; static int nseen, nwrites;
+static ULONGLONG wrote_at[16]; static int nwrote;
+
+static LONG CALLBACK trace_veh(EXCEPTION_POINTERS *e) {
+    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(e->ContextRecord->Dr6 & 1)) return EXCEPTION_CONTINUE_SEARCH;
+    e->ContextRecord->Dr6 = 0;
+    if (nwrites < 400) {
+        ULONGLONG rip = (ULONGLONG)((BYTE *)e->ExceptionRecord->ExceptionAddress - base) + 0x140000000ULL;
+        float now = *(float *)trace_addr; int i;
+        for (i = 0; i < nwrote && wrote_at[i] != rip; i++);
+        if (i == nwrote && nwrote < 16) {
+            wrote_at[nwrote++] = rip;
+            say("TraceAnim: frame written by the instruction before %llx: %g -> %g (step %g)\n", rip, trace_prev, now, now - trace_prev);
+            save_log();
+        }
+        trace_prev = now; nwrites++;
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+#include <tlhelp32.h>
+static DWORD WINAPI set_watch(LPVOID p) {                  /* DR0 on every thread but this one */
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te; te.dwSize = sizeof te;
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        HANDLE t; CONTEXT ctx;
+        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
+        if (!(t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, te.th32ThreadID))) continue;
+        SuspendThread(t);
+        ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(t, &ctx)) {
+            ctx.Dr0 = (DWORD64)trace_addr; ctx.Dr7 = 1 | (1 << 16) | (3 << 18);   /* L0, write, 4 bytes */
+            SetThreadContext(t, &ctx);
+        }
+        ResumeThread(t); CloseHandle(t);
+    }
+    CloseHandle(snap);
+    return 0;
+}
+
+/* per player: last frame and the step seen; after ~600 evaluations the steps are logged and a player
+   stepping >= 0.9 per evaluation (60 fps speed at 120 fps) is watched, else the first moving one */
+static float seen_step[64]; static int nevals;
+static void record(BYTE *player) {
+    int i; float f = *(float *)(player + 0x10);
+    if (!trace_addr) {
+        for (i = 0; i < nseen && seen[i].player != player; i++);
+        if (i == nseen && nseen < 64) { seen[nseen].player = player; seen[nseen++].frame = f; }
+        else if (i < nseen) {
+            if (f != seen[i].frame && f > seen[i].frame) seen_step[i] = f - seen[i].frame;
+            seen[i].frame = f;
+        }
+        if (++nevals == 600) {
+            int pick = -1;
+            for (i = 0; i < nseen; i++) {
+                say("TraceAnim: player %p step %g\n", seen[i].player, seen_step[i]);
+                if (seen_step[i] >= 0.9f && pick < 0) pick = i;
+            }
+            for (i = 0; i < nseen && pick < 0; i++) if (seen_step[i] > 0) pick = i;
+            if (pick >= 0) {
+                trace_addr = (BYTE *)seen[pick].player + 0x10; trace_prev = *(float *)trace_addr;
+                say("TraceAnim: watching player %p\n", seen[pick].player);
+                AddVectoredExceptionHandler(1, trace_veh);
+                CloseHandle(CreateThread(0, 0, set_watch, 0, 0, 0));
+            }
+            save_log();
+        }
+    }
+}
+
+typedef void(__fastcall *Eval4)(BYTE *, void *, void *, void *);
+static Eval4 mat_tramp, obj_tramp;
+static void __fastcall mat_hook(BYTE *p, void *a, void *b, void *c) { record(p); mat_tramp(p, a, b, c); }
+static void __fastcall obj_hook(BYTE *p, void *a, void *b, void *c) { record(p); obj_tramp(p, a, b, c); }
+
+static int detour(ULONGLONG va, const char *orig, int n, void *hook, Eval4 *tramp) {   /* n whole instructions */
+    BYTE *t;
+    if (!is(va, orig, n) || !(t = VirtualAlloc(0, 64, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE))) return 0;
+    memcpy(t, VA(va), n);
+    t[n] = 0xff; t[n + 1] = 0x25; *(DWORD *)(t + n + 2) = 0; *(BYTE **)(t + n + 6) = VA(va + n);
+    *tramp = (Eval4)t;
+    return jmp_at(va, hook);
+}
+
+static int trace_anim(void) {                       /* material player, object player evaluate */
+    return detour(0x140268a00, "\x40\x55\x41\x54\x48\x83\xec\x48", 8, mat_hook, &mat_tramp) &&
+           detour(0x1402685d0, "\x40\x53\x48\x81\xec\xb0\x00\x00\x00", 9, obj_hook, &obj_tramp);
+}
+
 /* ---- startup ---- */
 static void report(const char *key, int val, int ok) {
     say("%s=%d: %s\n", key, val, !ok ? "SKIPPED - unexpected exe bytes (other game version?)" : val ? "on" : "off");
@@ -394,6 +496,7 @@ static void install(HMODULE self) {
     v = opt("Anisotropy", 16);
     if (v >= 0 && v <= 16) { aniso_level = v; say("Anisotropy=%d: %s\n", v, v ? "on" : "off"); }
     else say("Anisotropy=%d: SKIPPED - must be 0..16\n", v);
+    if (opt("TraceAnim", 0)) say("TraceAnim: %s\n", trace_anim() ? "on (debug)" : "SKIPPED - unexpected exe bytes");
     v = opt("SkipIntro", 2);
     if (v >= 0 && v <= 2) report("SkipIntro", v, fix_intro(v)); else say("SkipIntro=%d: SKIPPED - must be 0..2\n", v);
     v = opt("ShadowNoiseFix", 5);
