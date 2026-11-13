@@ -111,12 +111,14 @@ static int fix_intro(int mode) {
    slow motion) like normal gameplay.
    The scene updates for event/Library scenes (14015e16d) and late battle states such as the defeat
    sequences (14013b35a) clamp their step to max(frame time, 1.0), like the limiter did: their
-   "comiss xmm7(1.0), xmm6; jbe; movaps xmm6, xmm7" becomes a jmp over the clamp. ---- */
+   "comiss xmm7(1.0), xmm6; jbe; movaps xmm6, xmm7" becomes a jmp over the clamp.
+   The UI manager update (140214220) clamps the menu animation step the same way
+   ("comiss xmm6(1.0), xmm0; ja"); the ja is removed unless FastMenus=1 (menus at 2x at 120 fps). ---- */
 static const ULONGLONG dt_clamp[2] = {0x14013b362, 0x14015e175};
 void obj_adv(void), mat_adv(void);
 ULONGLONG g_frametime;
 
-static int fix_fps(int f) {
+static int fix_fps(int f, int fast_menus) {
     static const int orig[4] = {15, 20, 30, 60};
     static const ULONGLONG ev_step[2] = {0x1400e66ce, 0x1400e6b49};
     int t[2], i;
@@ -129,7 +131,9 @@ static int fix_fps(int f) {
             *(float *)VA(0x14057643c) != 1.0f) return 0;
     for (i = 0; i < 2; i++)                                 /* comiss xmm7, xmm6; jbe +3; movaps xmm6, xmm7 */
         if (!is(dt_clamp[i], "\x0f\x2f\xfe\x76\x03\x0f\x28\xf7", 8)) return 0;
+    if (!is(0x140214247, "\x0f\x2f\xf0\x77\x03\x0f\x28\xf0", 8)) return 0;   /* UI: comiss xmm6, xmm0; ja +3 */
     if (f == 60) return 1;
+    if (!fast_menus) put(VA(0x14021424a), "\x90\x90", 2);   /* menu animations: step below 1.0 kept */
     t[0] = f / 2; t[1] = f;
     put(VA(0x140573af8), t, sizeof t);
     put(VA(0x14026ccc2), "\xeb", 1);                       /* frame time below 1/60 s is kept */
@@ -673,7 +677,8 @@ static void install(HMODULE self) {
     if (v >= 512 && v <= 8192) say("ShadowResolution=%d: %s\n", v, fix_shadow(v) ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
     else say("ShadowResolution=%d: SKIPPED - must be 512..8192\n", v);
     v = opt("FrameRate", 60);
-    if (v >= 60 && v <= 360) say("FrameRate=%d: %s\n", v, fix_fps(v) ? "on" : "SKIPPED - unexpected exe bytes (other game version?)");
+    if (v >= 60 && v <= 360) say("FrameRate=%d: %s%s\n", v, fix_fps(v, opt("FastMenus", 0)) ? "on" : "SKIPPED - unexpected exe bytes (other game version?)",
+                                 v > 60 && opt("FastMenus", 0) ? " (FastMenus=1: menu animations stay faster)" : "");
     else say("FrameRate=%d: SKIPPED - must be 60..360\n", v);
     GetPrivateProfileStringA("SKMod", "MaxResolution", "0", s, sizeof s, ini);
     if (atoi(s) == 0) say("MaxResolution=0: off\n");
