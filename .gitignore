@@ -1,0 +1,7 @@
+dinput8.dll
+*.obj
+*.res
+*.lib
+*.exp
+*.log
+*.bak
