@@ -19,7 +19,8 @@ static BYTE *base;
 static char dir[MAX_PATH], ini[MAX_PATH], logbuf[16384];
 static CRITICAL_SECTION log_cs;
 static volatile LONG tex_count, tex_mipped, tex_failed, ps_mip, ps_mip_failed;   /* MipFix counters, written with the log */
-static volatile LONG rot_wraps;                     /* FrameRate: rotation keys interpolated the short way */
+static volatile LONG rot_lerps, rot_steps;          /* FrameRate: rotations blended between frames */
+#define V3(p) (p)[0], (p)[1], (p)[2]
 
 static int opt(const char *key, int def) { return GetPrivateProfileIntA("SKMod", key, def, ini); }
 
@@ -38,7 +39,7 @@ static void save_log(void) {
     if (!fopen_s(&f, path, "w")) {
         fputs(logbuf, f);
         if (tex_count) fprintf(f, "Textures so far: %ld loaded, %ld got mipmaps (MipFix), %ld failed and kept as shipped\n", tex_count, tex_mipped, tex_failed);
-        if (rot_wraps) fprintf(f, "Rotation keys crossing 180 deg interpolated the short way so far: %ld frames\n", rot_wraps);
+        if (rot_lerps || rot_steps) fprintf(f, "Rotations between motion keys so far: %ld blended, %ld took the nearer key\n", rot_lerps, rot_steps);
         if (ps_mip || ps_mip_failed) fprintf(f, "Material shaders so far: %ld patched (MipFix/ShadowNoiseFix), %ld refused and kept original\n", ps_mip, ps_mip_failed);
         fclose(f);
     }
@@ -126,35 +127,23 @@ void obj_adv(void), mat_adv(void), ui_step(void);
 float ui_acc; int fast_menus;
 ULONGLONG g_frametime, g_wstep;                     /* g_wstep: float in the slot page (near the exe) */
 
-/* Motions (Tamlib TMO, also the TCM camera motions of finishers/menus) in the per-channel key format
-   store each rotation as 3 Euler angles (radians), interpolated linearly between keys by 14025b650.
-   An angle crossing +-180 deg between keys one frame apart (3.1 -> -3.1) interpolates through 0: at
-   60 fps only the keys are shown, above 60 the frame in between turns the other way round (a finisher
-   camera showed one frame upside down). rot_eval is that evaluator for the rotation channel (call at
-   14025baea) taking the short way between keys one frame apart; everything else is unchanged. */
-typedef struct { WORD frame, flags; float v; DWORD pad[2]; } MKey;
-static int (*key_find)(void *chan, unsigned frame, unsigned cached);   /* 14025e260 */
-
-static void rot_eval(float *out, BYTE *ch, float t) {
-    WORD *cache = (WORD *)(ch + 8);
-    BYTE *c = *(BYTE **)ch;
-    int f = (int)t, i, j, n, span;
-    for (i = 0; i < 3; i++, c += 16) {
-        MKey *k = *(MKey **)c;
-        float d;
-        n = *(WORD *)(c + 8);
-        j = key_find(c, (WORD)f, cache[i]);
-        if (j < 0) { if (n) out[i] = k[0].v; cache[i] = 0; continue; }
-        cache[i] = (WORD)j;
-        if (j == n - 1 || ((k[j].flags & 15) != 2 && (k[j].flags & 15) != 3)) { out[i] = k[j].v; continue; }
-        d = k[j + 1].v - k[j].v;
-        span = k[j + 1].frame - k[j].frame;
-        if (span == 1 && (d > 3.14159265f || d < -3.14159265f)) {
-            d -= 6.28318531f * floorf(d / 6.28318531f + 0.5f);
-            InterlockedIncrement(&rot_wraps);
-        }
-        out[i] = (t - k[j].frame) / span * d + k[j].v;
+/* Motions with float keys per frame (Tamlib TMO; the TCM camera motions of finishers and the menu):
+   on whole frames each bone gets its key's Euler angles as stored; between frames (only seen above
+   60 fps) 14025bca9 blends the two keys through quaternions (140259a30) and back to Euler angles. That
+   round trip comes out turned 180 deg for some keys (TraceFlip: the menu camera's up vector reversed on
+   every in-between frame, so the picture flickered upside down). rot_blend blends the stored angles
+   themselves, the short way round, as the whole frames use them; keys that describe the rotation
+   differently (an angle jumping more than 90 deg in one frame) give the nearer key, like the game's
+   16-bit key format does. Unchanged at 60 fps and below. */
+static __m128 rot_blend(const float *a, const float *b, float t) {
+    float d[3]; int i;
+    for (i = 0; i < 3; i++) {
+        d[i] = b[i] - a[i];
+        d[i] -= 6.28318531f * floorf(d[i] / 6.28318531f + 0.5f);
+        if (fabsf(d[i]) > 1.5707964f) { InterlockedIncrement(&rot_steps); return _mm_setr_ps(V3(t < 0.5f ? a : b), 1.0f); }
     }
+    InterlockedIncrement(&rot_lerps);
+    return _mm_setr_ps(a[0] + t * d[0], a[1] + t * d[1], a[2] + t * d[2], 1.0f);
 }
 
 static int fix_fps(int f, int fast) {
@@ -173,17 +162,13 @@ static int fix_fps(int f, int fast) {
     if (!is(0x140214247, "\x0f\x2f\xf0\x77\x03\x0f\x28\xf0", 8)) return 0;   /* UI: comiss xmm6, xmm0; ja +3 */
     for (i = 0; i < 4; i++)                                 /* shop: movss xmmN, [rip -> frame time] */
         if (!is(shop_dt[i], "\xf3\x0f\x10", 3) || rip_target(shop_dt[i], 4, 8) != VA(0x1405c6f0c)) return 0;
-    if (!is(0x14025baea, "\xe8", 1) || rip_target(0x14025baea, 1, 5) != VA(0x14025b650) ||
-        !is(0x14025b6ba, "\xe8", 1) || rip_target(0x14025b6ba, 1, 5) != VA(0x14025e260) ||
-        !is(0x14025b650, "\x48\x89\x5c\x24\x18", 5)) return 0;
+    if (!is(0x14025bca9, "\xe8", 1) || rip_target(0x14025bca9, 1, 5) != VA(0x140259a30) ||
+        !is(0x14025bc9c, "\x0f\x28\xd7", 3)) return 0;      /* movaps xmm2, xmm7 (fraction) */
     if (f == 60) return 1;
     /* FpsParts (debug, default all): 1 menu UI step, 2 event/battle scene step, 4 library scene step,
-       8 event character step, 16 default-speed object/material animations, 32 rotation keys */
+       8 event character step, 16 default-speed object/material animations, 32 rotations between keys */
     parts = opt("FpsParts", 63);
-    if (parts & 32) {
-        key_find = (void *)VA(0x14025e260);
-        if (!call_at(0x14025baea, rot_eval, 5)) return 0;
-    }
+    if ((parts & 32) && !call_at(0x14025bca9, rot_blend, 5)) return 0;
     fast_menus = fast;
     if (parts & 1) {                                        /* menus/UI and shop: whole steps */
         BYTE *page = near_jmp(0);                           /* any slot address = the page near the exe */
@@ -635,6 +620,58 @@ static int trace_motion(void) {
            detour(0x1400428f0, "\x40\x53\x48\x81\xec\x80\x00\x00\x00", 9, blend_hook, (Eval4 *)&blend_tramp);
 }
 
+/* TraceFlip (debug): a camera turned upside down for one frame at 120 fps (finisher, menu). Tamlib
+   cameras double-buffer their state (index +28Ch; matrices at +10h/+90h + idx*40h; eye +110h, Euler
+   +130h, target +150h, up +170h, + idx*10h). Logs the call chain when SetUp (vfunc +48h) reverses
+   the up vector, and the state when the buffer swap (vfunc +20h, once per frame) sees a matrix row
+   reverse from the previous frame. */
+typedef void(__fastcall *CamFn)(BYTE *, float *);
+static CamFn setup_tramp, swap_tramp;
+static int nflip;
+static float cosang(const float *a, const float *b) {
+    float ab = a[0] * b[0] + a[1] * b[1] + a[2] * b[2], aa = a[0] * a[0] + a[1] * a[1] + a[2] * a[2], bb = b[0] * b[0] + b[1] * b[1] + b[2] * b[2];
+    return aa > 1e-12f && bb > 1e-12f ? ab / sqrtf(aa * bb) : 1;
+}
+static void flip_chain(void) {
+    void *fr[24]; int k = RtlCaptureStackBackTrace(1, 24, fr, 0), i;
+    say(" chain:");
+    for (i = 0; i < k; i++)
+        if ((BYTE *)fr[i] > base + 0x1000 && (BYTE *)fr[i] < base + 0x346000) say(" %llx", (ULONGLONG)((BYTE *)fr[i] - base) + 0x140000000ULL);
+    say("\n");
+}
+static ULONGLONG cam_vt(BYTE *c) { return (ULONGLONG)(*(BYTE **)c - base) + 0x140000000ULL; }
+static void __fastcall setup_hook(BYTE *c, float *v) {
+    float *cur = (float *)(c + 0x170 + 16 * *(int *)(c + 0x28c));
+    if (nflip < 60 && cosang(cur, v) < -0.5f) {
+        nflip++;
+        say("TraceFlip: camera %p (vtable %llx) up (%g %g %g) -> (%g %g %g), frame time %g;", c, cam_vt(c), V3(cur), V3(v), *(float *)(base + 0x60fc00));
+        flip_chain(); save_log();
+    }
+    setup_tramp(c, v);
+}
+static void __fastcall swap_hook(BYTE *c, float *unused) {
+    int i = *(int *)(c + 0x28c), m, r;
+    if (nflip < 60 && cam_vt(c) != 0x1404ec718ULL)
+        for (m = 0; m < 2; m++) for (r = 0; r < 3 - m; r++) {     /* projection: z row is set at startup */
+            float *a = (float *)(c + 0x10 + 0x80 * m + 0x40 * i + 16 * r), *b = (float *)(c + 0x10 + 0x80 * m + 0x40 * (i ^ 1) + 16 * r);
+            if (cosang(a, b) < -0.5f) {
+                float *e = (float *)(c + 0x110), *u = (float *)(c + 0x130), *t = (float *)(c + 0x150), *up = (float *)(c + 0x170);
+                nflip++;
+                say("TraceFlip: camera %p (vtable %llx) matrix %d row %d (%g %g %g) -> (%g %g %g), frame time %g\n"
+                    "  eye (%g %g %g)/(%g %g %g) euler (%g %g %g)/(%g %g %g) target (%g %g %g)/(%g %g %g) up (%g %g %g)/(%g %g %g) [buffer 0/1, current %d];",
+                    c, cam_vt(c), m, r, V3(b), V3(a), *(float *)(base + 0x60fc00),
+                    V3(e), V3(e + 4), V3(u), V3(u + 4), V3(t), V3(t + 4), V3(up), V3(up + 4), i);
+                flip_chain(); save_log();
+                m = 2; break;
+            }
+        }
+    swap_tramp(c, unused);
+}
+static int trace_flip(void) {
+    return detour(0x140242b90, "\x48\x63\x81\x8c\x02\x00\x00", 7, setup_hook, (Eval4 *)&setup_tramp) &&
+           detour(0x1402429f0, "\x48\x63\x81\x8c\x02\x00\x00", 7, swap_hook, (Eval4 *)&swap_tramp);
+}
+
 /* TraceSea (debug): 45 s after start, scans the heap for the sea material's parameters
    (m_Param[0] = 100, .5, .5, 0; m_Param[1] = x, 10x, -x, 20x, seen in RenderDoc) and watches
    m_Param[1].y with the hardware breakpoint, logging the code that scrolls it. */
@@ -722,6 +759,7 @@ static void install(HMODULE self) {
     else say("Anisotropy=%d: SKIPPED - must be 0..16\n", v);
     if (opt("TraceAnim", 0)) say("TraceAnim: %s\n", trace_anim() ? "on (debug)" : "SKIPPED - unexpected exe bytes");
     if ((trace_sea_on = opt("TraceSea", 0))) { trace_anim(); CloseHandle(CreateThread(0, 0, sea_scan, 0, 0, 0)); }
+    if (opt("TraceFlip", 0)) say("TraceFlip: %s\n", trace_flip() ? "on (debug)" : "SKIPPED - unexpected exe bytes");
     if (opt("TraceMotion", 0)) say("TraceMotion: %s\n", trace_motion() ? "on (debug)" : "SKIPPED - unexpected exe bytes");
     v = opt("SkipIntro", 2);
     if (v >= 0 && v <= 2) report("SkipIntro", v, fix_intro(v)); else say("SkipIntro=%d: SKIPPED - must be 0..2\n", v);
