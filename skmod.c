@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <intrin.h>
 #include <dxgi.h>
 #include <d3d11.h>
 #include "version.h"
@@ -103,22 +104,34 @@ static int fix_intro(int mode) {
    Model instances advance their object and material animations by a fixed default speed of 1.0 per
    frame unless a caller sets it from the frame time (measured with TraceAnim/TraceSea: the menu sea
    scrolled 0.0465/s at 120 fps vs 0.0235/s at 60). obj_adv/mat_adv scale a default speed by the
-   frame time (stubs.asm). ---- */
+   frame time (stubs.asm).
+   Characters in event scenes (entries, transformations, defeat moves, their Library replays) are
+   updated with a literal step of 1.0 per frame (movss xmm1, [1.0] before call [rax+40h], found with
+   TraceMotion); those two loads now read the game's frame-time step (1405c63ac, which also follows
+   slow motion) like normal gameplay. ---- */
 void obj_adv(void), mat_adv(void);
 ULONGLONG g_frametime;
 
 static int fix_fps(int f) {
     static const int orig[4] = {15, 20, 30, 60};
-    int t[2];
+    static const ULONGLONG ev_step[2] = {0x1400e66ce, 0x1400e6b49};
+    int t[2], i;
     if (memcmp(VA(0x140573af0), orig, sizeof orig) || !is(0x14026ccc2, "\x77\x04\x41\x0f\x28\xc9", 6) ||
         !is(0x14026ccb0, "\x41\x0f\x2f\xc9", 4) || !is(0x14026ccd2, "\xf3\x0f\x11\x0d", 4) ||
         !is(0x14004120d, "\xf3\x0f\x10\x4b\x64\xf3\x0f\x58\x4b\x60", 10) ||
         !is(0x140041240, "\xf3\x0f\x10\x8b\x84\x00\x00\x00\x48\x8b\x43\x78", 12)) return 0;
+    for (i = 0; i < 2; i++)                                 /* movss xmm1, [rip -> 1.0] */
+        if (!is(ev_step[i], "\xf3\x0f\x10\x0d", 4) || rip_target(ev_step[i], 4, 8) != VA(0x14057643c) ||
+            *(float *)VA(0x14057643c) != 1.0f) return 0;
     if (f == 60) return 1;
     t[0] = f / 2; t[1] = f;
     put(VA(0x140573af8), t, sizeof t);
     put(VA(0x14026ccc2), "\xeb", 1);                       /* frame time below 1/60 s is kept */
     g_frametime = (ULONGLONG)rip_target(0x14026ccd2, 4, 8);   /* where the limiter stores it */
+    for (i = 0; i < 2; i++) {                               /* event characters: game step instead of 1.0 */
+        int d = (int)(VA(0x1405c63ac) - (VA(ev_step[i]) + 8));
+        put(VA(ev_step[i] + 4), &d, 4);
+    }
     return call_at(0x14004120d, obj_adv, 10) && call_at(0x140041240, mat_adv, 8);
 }
 
@@ -511,6 +524,39 @@ static int trace_anim(void) {                       /* material player, object p
            detour(0x1402685d0, "\x40\x53\x48\x81\xec\xb0\x00\x00\x00", 9, obj_hook, &obj_tramp);
 }
 
+/* TraceMotion (debug): character motions advance by frame += dt * speed (Tamlib::CTmoInstance and
+   CBlendTmoInstance update, dt in xmm1). Normal callers pass the frame-time step (~0.5 at 120 fps);
+   every call site seen passing exactly 1.0 (per-frame stepping, too fast above 60 fps) is logged once
+   with the motion's frame and length. */
+typedef void(__fastcall *UpdFn)(BYTE *, float);
+static UpdFn tmo_tramp, blend_tramp;
+static ULONGLONG mot_seen[512]; static int nmot;
+static void mot_record(BYTE *m, float dt, ULONGLONG *sp) {
+    ULONGLONG chain[6], h = 0; int i, n = 0;
+    if (dt != 1.0f || *(float *)(base + 0x60fc00) >= 0.75f) return;     /* only at high frame rates */
+    if (*(float *)(m + 0x50) <= 0) return;                              /* empty motion */
+    for (i = 0; i < 160 && n < 6; i++)                                   /* game code on the stack */
+        if (sp[i] > (ULONGLONG)base + 0x1000 && sp[i] < (ULONGLONG)base + 0x346000) {
+            chain[n++] = sp[i] - (ULONGLONG)base + 0x140000000ULL; h = h * 31 + chain[n - 1];
+        }
+    if (n && chain[0] == 0x1402239bbULL) return;                         /* UI animations (separate issue) */
+    for (i = 0; i < nmot && mot_seen[i] != h; i++);
+    if (i < nmot || nmot == 512) return;
+    mot_seen[nmot++] = h;
+    say("TraceMotion: motion %p advanced by a fixed 1.0 per frame (frame %g of %g, speed %g); chain:",
+        m, *(float *)(m + 0x1c), *(float *)(m + 0x50), *(float *)(m + 0x20));
+    for (i = 0; i < n; i++) say(" %llx", chain[i]);
+    say("\n");
+    save_log();
+}
+static void __fastcall tmo_hook(BYTE *m, float dt) { mot_record(m, dt, (ULONGLONG *)_AddressOfReturnAddress()); tmo_tramp(m, dt); }
+static void __fastcall blend_hook(BYTE *m, float dt) { mot_record(m, dt, (ULONGLONG *)_AddressOfReturnAddress()); blend_tramp(m, dt); }
+
+static int trace_motion(void) {
+    return detour(0x14025cf60, "\x40\x53\x48\x83\xec\x40", 6, tmo_hook, (Eval4 *)&tmo_tramp) &&
+           detour(0x1400428f0, "\x40\x53\x48\x81\xec\x80\x00\x00\x00", 9, blend_hook, (Eval4 *)&blend_tramp);
+}
+
 /* TraceSea (debug): 45 s after start, scans the heap for the sea material's parameters
    (m_Param[0] = 100, .5, .5, 0; m_Param[1] = x, 10x, -x, 20x, seen in RenderDoc) and watches
    m_Param[1].y with the hardware breakpoint, logging the code that scrolls it. */
@@ -598,6 +644,7 @@ static void install(HMODULE self) {
     else say("Anisotropy=%d: SKIPPED - must be 0..16\n", v);
     if (opt("TraceAnim", 0)) say("TraceAnim: %s\n", trace_anim() ? "on (debug)" : "SKIPPED - unexpected exe bytes");
     if ((trace_sea_on = opt("TraceSea", 0))) { trace_anim(); CloseHandle(CreateThread(0, 0, sea_scan, 0, 0, 0)); }
+    if (opt("TraceMotion", 0)) say("TraceMotion: %s\n", trace_motion() ? "on (debug)" : "SKIPPED - unexpected exe bytes");
     v = opt("SkipIntro", 2);
     if (v >= 0 && v <= 2) report("SkipIntro", v, fix_intro(v)); else say("SkipIntro=%d: SKIPPED - must be 0..2\n", v);
     v = opt("ShadowNoiseFix", 5);
