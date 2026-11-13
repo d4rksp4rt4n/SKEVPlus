@@ -14,6 +14,7 @@
 static BYTE *base;
 static char dir[MAX_PATH], ini[MAX_PATH], logbuf[16384];
 static CRITICAL_SECTION log_cs;
+static volatile LONG tex_count, tex_mipped, tex_failed;   /* MipFix counters, written with the log */
 
 static int opt(const char *key, int def) { return GetPrivateProfileIntA("SKMod", key, def, ini); }
 
@@ -29,7 +30,11 @@ static void save_log(void) {
     char path[MAX_PATH]; FILE *f;
     sprintf_s(path, MAX_PATH, "%sskmod.log", dir);
     EnterCriticalSection(&log_cs);
-    if (!fopen_s(&f, path, "w")) { fputs(logbuf, f); fclose(f); }
+    if (!fopen_s(&f, path, "w")) {
+        fputs(logbuf, f);
+        if (tex_count) fprintf(f, "Textures so far: %ld loaded, %ld got mipmaps (MipFix), %ld failed and kept as shipped\n", tex_count, tex_mipped, tex_failed);
+        fclose(f);
+    }
     LeaveCriticalSection(&log_cs);
 }
 
@@ -188,6 +193,40 @@ static HRESULT STDMETHODCALLTYPE ss_hook(ID3D11Device *dev, const D3D11_SAMPLER_
     return ss_orig(dev, &d, out);
 }
 
+/* ---- textures: the game loads them with D3DX11CreateTextureFromMemory (no load info) ---- */
+typedef struct {                       /* D3DX11_IMAGE_INFO (d3dx11tex.h, not in the Windows SDK) */
+    UINT Width, Height, Depth, ArraySize, MipLevels, MiscFlags; DXGI_FORMAT Format;
+    D3D11_RESOURCE_DIMENSION ResourceDimension; int ImageFileFormat;
+} ImgInfo;
+typedef struct {                       /* D3DX11_IMAGE_LOAD_INFO */
+    UINT Width, Height, Depth, FirstMipLevel, MipLevels; D3D11_USAGE Usage;
+    UINT BindFlags, CpuAccessFlags, MiscFlags; DXGI_FORMAT Format; UINT Filter, MipFilter; ImgInfo *pSrcInfo;
+} LoadInfo;
+#define DX_DEFAULT ((UINT)-1)
+#define DX_FROM_FILE ((UINT)-3)
+typedef HRESULT(WINAPI *InfoFn)(const void *, SIZE_T, void *, ImgInfo *, HRESULT *);
+typedef HRESULT(WINAPI *TexFn)(ID3D11Device *, const void *, SIZE_T, LoadInfo *, void *, ID3D11Resource **, HRESULT *);
+static InfoFn info_fn;
+static TexFn tex_orig;
+
+/* MipFix: most stage/object textures ship as single-level DDS (e.g. 3649 of the 4.6k DXT textures in
+   Model/Field), so they shimmer at a distance whatever the sampler allows. Those get a full mip chain
+   built by D3DX at load (same format; box filter). Cube maps and tiny textures are left as they are. */
+static HRESULT WINAPI tex_hook(ID3D11Device *dev, const void *src, SIZE_T n, LoadInfo *li, void *pump, ID3D11Resource **tex, HRESULT *hr2) {
+    ImgInfo ii; HRESULT r;
+    InterlockedIncrement(&tex_count);
+    if (!li && SUCCEEDED(info_fn(src, n, 0, &ii, 0)) && ii.MipLevels == 1 && ii.ArraySize == 1 &&
+        ii.ResourceDimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D && !(ii.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) &&
+        (ii.Width >= 16 || ii.Height >= 16)) {
+        LoadInfo l = {DX_FROM_FILE, DX_FROM_FILE, DX_FROM_FILE, 0, 0, (D3D11_USAGE)DX_DEFAULT, DX_DEFAULT, DX_DEFAULT,
+                      DX_DEFAULT, (DXGI_FORMAT)DX_FROM_FILE, DX_DEFAULT, DX_DEFAULT, 0};
+        if (SUCCEEDED(r = tex_orig(dev, src, n, &l, pump, tex, hr2))) InterlockedIncrement(&tex_mipped);
+        else { InterlockedIncrement(&tex_failed); r = tex_orig(dev, src, n, li, pump, tex, hr2); }   /* as shipped */
+    } else r = tex_orig(dev, src, n, li, pump, tex, hr2);
+    if (tex_count % 200 == 0) save_log();
+    return r;
+}
+
 /* ---- the device and swap chain come from the exe's D3D11CreateDeviceAndSwapChain import ---- */
 typedef HRESULT(WINAPI *CreateDevSC)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL *, UINT, UINT,
                                      const DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **, ID3D11Device **, D3D_FEATURE_LEVEL *,
@@ -263,6 +302,12 @@ static void install(HMODULE self) {
     else if (!v) say("MaxResolution=%s: SKIPPED - unexpected exe bytes (other game version?)\n", s);
     else say("MaxResolution=%dx%d: on (Fullscreen screen mode)\n", res_w, res_h);
 
+    v = opt("MipFix", 1);
+    if (v && (slot = iat_slot("d3dx11_43.dll", "D3DX11GetImageInfoFromMemory"))) info_fn = (InfoFn)*slot;
+    if (info_fn && (slot = iat_slot("d3dx11_43.dll", "D3DX11CreateTextureFromMemory"))) {
+        void *h = (void *)tex_hook; tex_orig = (TexFn)*slot; put(slot, &h, sizeof h);
+    }
+    say("MipFix=%d: %s\n", v, !v ? "off" : tex_orig ? "on" : "SKIPPED - D3DX11 texture import not found");
     if ((slot = iat_slot("d3d11.dll", "D3D11CreateDeviceAndSwapChain"))) {
         void *h = (void *)dev_hook; dev_orig = (CreateDevSC)*slot; put(slot, &h, sizeof h);
     } else say("D3D11 import not found: Anisotropy and the MaxResolution display switch inactive\n");
@@ -284,8 +329,8 @@ __declspec(dllexport) HRESULT WINAPI DirectInput8Create(HINSTANCE h, DWORD v, RE
 
 BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID res) {
     if (reason == DLL_PROCESS_ATTACH) { DisableThreadLibraryCalls(self); install(self); }
-    if (reason == DLL_PROCESS_DETACH && ss_orig) {
-        say("Samplers: %ld created, %ld made anisotropic\n", ss_count, ss_aniso);
+    if (reason == DLL_PROCESS_DETACH) {
+        if (ss_orig) say("Samplers: %ld created, %ld made anisotropic\n", ss_count, ss_aniso);
         save_log();
     }
     return TRUE;
