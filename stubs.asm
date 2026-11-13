@@ -1,18 +1,22 @@
 ; Small x64 stubs called from the game's code (via a jump slot near the exe, see near_jmp in skmod.c).
 ; Each replaces the game instructions noted and keeps every register the game still uses there.
 EXTERN g_scene:QWORD, g_flag:QWORD, g_app:QWORD, res_w:DWORD, res_h:DWORD, fov_ref:DWORD, near_max:DWORD, one_f:DWORD, shadow_vt:QWORD, g_dofnear:QWORD, shadow_ret:QWORD
-EXTERN g_frametime:QWORD, ui_acc:DWORD
+EXTERN g_frametime:QWORD, ui_acc:DWORD, g_wstep:QWORD, fast_menus:DWORD
 .code
 
-; FrameRate (FastMenus=0): the UI manager update computes its step as max(1.0, frame time). Menu logic
-; expects whole steps (e.g. waits for an animation to land on an exact frame: a fractional step made
-; the lottery menu hang), so above 60 fps time is accumulated and the UI gets 1.0 on the frames where
-; a full 1/60 s has passed and 0 on the others: same speed, same whole frames as at 60 fps.
+; FrameRate: menu/UI code was written for steps of at least 1/60 s and often truncates the step to a
+; whole number (a step of 0.5 truncates to 0: the lottery wheel never turned and the menu hung). The UI
+; manager update (once per frame) computes its step as max(1.0, frame time); above 60 fps time is
+; accumulated instead, giving a whole step: 1.0 on the frames where a full 1/60 s has passed, 0 on the
+; others (same speed, same whole frames as at 60 fps). It is stored at [g_wstep] (read by the shop
+; menu, patched in skmod.c) and used as the UI step unless FastMenus=1 (then the original 1.0 = 2x).
 ; Replaces "comiss xmm6, xmm0; ja +3; movaps xmm6, xmm0" (xmm6 = 1.0, xmm0 = frame time).
 ui_step PROC
+    mov r11, g_wstep
     comiss xmm0, dword ptr one_f
     jb short_frame
     movaps xmm6, xmm0                   ; 1/60 s or longer: original behaviour
+    movss dword ptr [r11], xmm0
     mov dword ptr ui_acc, 0
     ret
 short_frame:
@@ -21,10 +25,15 @@ short_frame:
     jb not_yet
     subss xmm0, dword ptr one_f         ; xmm6 stays 1.0
     movss dword ptr ui_acc, xmm0
+    movss dword ptr [r11], xmm6
     ret
 not_yet:
     movss dword ptr ui_acc, xmm0
+    mov dword ptr [r11], 0
+    cmp dword ptr fast_menus, 0
+    jne keep_one                        ; FastMenus=1: UI keeps 1.0 every frame
     xorps xmm6, xmm6
+keep_one:
     ret
 ui_step ENDP
 

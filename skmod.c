@@ -114,16 +114,19 @@ static int fix_intro(int mode) {
    "comiss xmm7(1.0), xmm6; jbe; movaps xmm6, xmm7" becomes a jmp over the clamp.
    The UI manager update (140214220) clamps the menu animation step the same way
    ("comiss xmm6(1.0), xmm0; ja"); unless FastMenus=1 (menus at 2x at 120 fps) ui_step gives the UI
-   whole steps at the real speed (a fractional step made the lottery menu hang). ---- */
+   whole steps at the real speed (a fractional step made the lottery menu hang). The shop menu reads
+   the frame time itself (4 loads) and truncates it to a whole number for its dialogs (the lottery
+   wheel turned by (int)0.5 = 0 and the menu hung): those loads read ui_step's whole step instead. ---- */
 static const ULONGLONG dt_clamp[2] = {0x14013b362, 0x14015e175};
+static const ULONGLONG shop_dt[4] = {0x140199529, 0x14019a128, 0x14019a1ca, 0x14019a262};
 void obj_adv(void), mat_adv(void), ui_step(void);
-float ui_acc;
-ULONGLONG g_frametime;
+float ui_acc; int fast_menus;
+ULONGLONG g_frametime, g_wstep;                     /* g_wstep: float in the slot page (near the exe) */
 
-static int fix_fps(int f, int fast_menus) {
+static int fix_fps(int f, int fast) {
     static const int orig[4] = {15, 20, 30, 60};
     static const ULONGLONG ev_step[2] = {0x1400e66ce, 0x1400e6b49};
-    int t[2], i;
+    int t[2], i, parts;
     if (memcmp(VA(0x140573af0), orig, sizeof orig) || !is(0x14026ccc2, "\x77\x04\x41\x0f\x28\xc9", 6) ||
         !is(0x14026ccb0, "\x41\x0f\x2f\xc9", 4) || !is(0x14026ccd2, "\xf3\x0f\x11\x0d", 4) ||
         !is(0x14004120d, "\xf3\x0f\x10\x4b\x64\xf3\x0f\x58\x4b\x60", 10) ||
@@ -134,18 +137,37 @@ static int fix_fps(int f, int fast_menus) {
     for (i = 0; i < 2; i++)                                 /* comiss xmm7, xmm6; jbe +3; movaps xmm6, xmm7 */
         if (!is(dt_clamp[i], "\x0f\x2f\xfe\x76\x03\x0f\x28\xf7", 8)) return 0;
     if (!is(0x140214247, "\x0f\x2f\xf0\x77\x03\x0f\x28\xf0", 8)) return 0;   /* UI: comiss xmm6, xmm0; ja +3 */
+    for (i = 0; i < 4; i++)                                 /* shop: movss xmmN, [rip -> frame time] */
+        if (!is(shop_dt[i], "\xf3\x0f\x10", 3) || rip_target(shop_dt[i], 4, 8) != VA(0x1405c6f0c)) return 0;
     if (f == 60) return 1;
-    if (!fast_menus && !call_at(0x140214247, ui_step, 8)) return 0;   /* menu animations: whole steps at real speed */
+    /* FpsParts (debug, default all): 1 menu UI step, 2 event/battle scene step, 4 library scene step,
+       8 event character step, 16 default-speed object/material animations */
+    parts = opt("FpsParts", 31);
+    fast_menus = fast;
+    if (parts & 1) {                                        /* menus/UI and shop: whole steps */
+        BYTE *page = near_jmp(0);                           /* any slot address = the page near the exe */
+        if (!page) return 0;
+        nslots--;
+        g_wstep = (ULONGLONG)(((ULONG_PTR)page & ~0xfffULL) + 0xff0);
+        *(float *)g_wstep = 1.0f;
+        if (!call_at(0x140214247, ui_step, 8)) return 0;
+        for (i = 0; i < 4; i++) {
+            int d = (int)((BYTE *)g_wstep - (VA(shop_dt[i]) + 8));
+            put(VA(shop_dt[i] + 4), &d, 4);
+        }
+    }
     t[0] = f / 2; t[1] = f;
     put(VA(0x140573af8), t, sizeof t);
     put(VA(0x14026ccc2), "\xeb", 1);                       /* frame time below 1/60 s is kept */
     g_frametime = (ULONGLONG)rip_target(0x14026ccd2, 4, 8);   /* where the limiter stores it */
-    for (i = 0; i < 2; i++) put(VA(dt_clamp[i] + 3), "\xeb", 1);   /* scene steps below 1.0 are kept */
-    for (i = 0; i < 2; i++) {                               /* event characters: game step instead of 1.0 */
+    for (i = 0; i < 2; i++)                                 /* scene steps below 1.0 are kept */
+        if (parts & (2 << i)) put(VA(dt_clamp[i] + 3), "\xeb", 1);
+    for (i = 0; i < 2 && (parts & 8); i++) {                /* event characters: game step instead of 1.0 */
         int d = (int)(VA(0x1405c63ac) - (VA(ev_step[i]) + 8));
         put(VA(ev_step[i] + 4), &d, 4);
     }
-    return call_at(0x14004120d, obj_adv, 10) && call_at(0x140041240, mat_adv, 8);
+    if (parts != 31) say("FpsParts=%d (debug: only some frame-rate fixes applied)\n", parts);
+    return !(parts & 16) || (call_at(0x14004120d, obj_adv, 10) && call_at(0x140041240, mat_adv, 8));
 }
 
 /* ---- ShadowResolution: the shadows are Tamlib::CShadowVsmBlurCascade (variance shadow maps, blurred,
