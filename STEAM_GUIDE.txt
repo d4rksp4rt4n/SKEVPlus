@@ -1,53 +1,57 @@
-The PC version of SENRAN KAGURA ESTIVAL VERSUS has some annoying problems: shimmering and sparkling textures, grainy flickering shadows, skin blotches flickering through swimsuits in zoomed-in shots, a 60 FPS cap, and a long boot through logos and videos. [b]SKEV+[/b] fixes all of that.
+SENRAN KAGURA ESTIVAL VERSUS still looks great on PC, but the port carries a handful of rendering bugs and limits from its Vita/PS4 roots: textures that shimmer and sparkle, grainy shadows, swimsuits that flicker in zoomed-in shots, and a hard 60 FPS cap. [b]SKEV+[/b] fixes them while the game runs.
 
-It's basically [b]one file[/b] that you drop into the game folder. It doesn't change your game files, and you can turn any fix off whenever you want.
+The mod is a single DLL (plus a settings file) that the game loads on startup. Every change happens in memory, so your game files and saves are never touched. Before patching anything, SKEV+ checks that the game code is exactly what it expects; if a future update changes something, only that one fix switches itself off and the rest keep working.
 
-If a future update changes the game, [b]SKEV+[/b] just skips the parts it doesn't recognize instead of breaking everything.
-
-[h2]What you get[/h2]
+[h2]What it fixes[/h2]
 [list]
-[*][b]Clean, sharp textures.[/b] No more shimmering wood, decks and sand, near or far, standing still or in motion.
-[*][b]Better shadows.[/b] Sharper, and no more bright speckles flickering inside them.
-[*][b]No more flickering skin blotches[/b] through swimsuits when the camera zooms in from far away.
-[*][b]120 FPS and more[/b] (up to 360), with the game running at its normal speed. Fights, finishers, transformations, entrances, defeat scenes, Library replays, the sea and sky, menus and the lottery all play at the right speed.
-[*][b]Higher resolutions[/b] if you use DSR (NVIDIA) or VSR (AMD).
-[*][b]Faster boot.[/b] It skips the intro logos and the opening movie.
+[*][b]Proper mipmapping.[/b] Most of the game's textures ship without mipmaps (the smaller copies a game uses for surfaces further away), and the material shaders were set to always read the full-size texture anyway. That's why wood, decks, ramps and sand crawl and sparkle as the camera moves. SKEV+ generates the missing mipmaps when textures load and lets the shaders use them, with 16x anisotropic filtering on top for crisp surfaces at an angle.
+[*][b]Cleaner shadows.[/b] The shadow map resolution goes from 1536 to 3072 for sharper edges, and a precision bug in the soft-shadow maths that left bright speckles flickering inside shadows near objects is corrected.
+[*][b]No skin showing through swimsuits.[/b] In long telephoto shots the depth buffer ran out of precision, so skin flickered through clothing. SKEV+ adjusts the camera's near plane to the zoom level, only in those shots, so close-ups, depth of field and shadows stay exactly as before.
+[*][b]High frame rate, correct speed.[/b] Play at 120 FPS (or anything up to 360) instead of 60. The game normally speeds up when you do that, so SKEV+ also fixes everything that was tied to the frame count: character animations, finishers, transformations, entrances, defeat scenes, Library replays, the sea and clouds, menu animations, the lottery wheel (which froze above 60 FPS) and controller menu scrolling. Camera animations that flipped upside down for a frame at high FPS are fixed too.
+[*][b]Real 4K with DSR/VSR.[/b] In Fullscreen mode the game always rendered at your desktop resolution. SKEV+ lets it render and display at a higher one, such as 3840x2160, using NVIDIA DSR or AMD VSR.
+[*][b]Straight to the title screen.[/b] The publisher and middleware logos and the opening movie are skipped.
 [/list]
 
+[h2]Installing[/h2]
 [b]Download:[/b]
 [quote]LINK HERE[/quote]
 
 [olist]
-[*]Download [b]SKEV+[/b] from the link above and unzip it.
-[*]Open your game folder. In your Steam Library, right-click [b]SENRAN KAGURA ESTIVAL VERSUS[/b], then go to [b]Manage > Browse local files[/b]. You should see [b]SKEstivalVersus.exe[/b] in there.
-[*]Copy [b]dinput8.dll[/b] and [b]skmod.ini[/b] into that folder, right next to SKEstivalVersus.exe.
-[*]Start the game [b]from Steam[/b].
+[*]Unzip the download anywhere.
+[*]Find the game folder: in your Steam Library, right-click [b]SENRAN KAGURA ESTIVAL VERSUS[/b] > [b]Manage[/b] > [b]Browse local files[/b]. It's the folder that contains [b]SKEstivalVersus.exe[/b].
+[*]Put [b]dinput8.dll[/b] and [b]skmod.ini[/b] in that folder, next to the exe.
+[*]Launch the game through Steam as usual.
 [/olist]
 
-[h2]Is it working?[/h2]
-If the intro logos are gone and you land straight on the title screen, [b]SKEV+[/b] is running. The very first start of a new save still shows the prologue, as the game always does.
+That's all. The settings in [b]skmod.ini[/b] are already tuned, so there's nothing else to set up.
 
-The default settings are already the recommended ones, so you don't have to change anything. Every option is explained in [b]skmod.ini[/b], if you want to tweak something.
+[h2]How do I know it's on?[/h2]
+The boot logos disappear and the game opens on the title screen. (On a brand-new save the game still plays its prologue first; that's the game, not the mod.)
 
-[h2]Steam Deck and Linux[/h2]
-Not tested yet, reports welcome. In Steam, right-click the game > [b]Properties[/b] > [b]Launch Options[/b], and enter:
+For the details, open [b]skmod.log[/b] in the game folder after playing. It's rewritten at every start and lists each fix with its result.
+
+[h2]Tweaking it[/h2]
+Open [b]skmod.ini[/b] with Notepad. Each line is one fix with a short explanation next to it, and [b]0[/b] always means "off, like the original game". Changes apply the next time you start the game.
+
+[h2]Steam Deck / Linux[/h2]
+Untested so far, feedback welcome. Proton needs to be told to use the mod's DLL: in Steam, right-click the game > [b]Properties[/b] > [b]Launch Options[/b] and paste:
 [code]WINEDLLOVERRIDES="dinput8=n,b" %command%[/code]
 
-[h1]Something's wrong?[/h1]
-[b]- A fix doesn't seem to work.[/b]
-Open [b]skmod.log[/b] in the game folder. It lists every fix as on, off or SKIPPED. "SKIPPED - unexpected exe bytes" means a game update changed something the mod doesn't know yet. Everything else still works.
+[h1]Troubleshooting[/h1]
+[b]- One of the fixes isn't doing anything.[/b]
+Check [b]skmod.log[/b]. Each fix is marked on, off or SKIPPED. SKIPPED means the game code didn't match what the mod expects, usually after a game update, so that fix stayed off to be safe.
 
-[b]- The game doesn't go above 60 FPS.[/b]
-Set the frame rate to 60 in the game's own settings (30 gives half of the FrameRate in skmod.ini). With V-Sync on, your monitor's refresh rate is the limit: a 60 Hz screen stays at 60.
+[b]- I'm still at 60 FPS.[/b]
+In the game's own options, the frame rate must be set to 60; at 30 you get half of the FrameRate in skmod.ini. V-Sync also caps you at your monitor's refresh rate, so a 60 Hz display can't show more than 60.
 
-[b]- I can't get resolutions above my monitor's.[/b]
-Turn on DSR/VSR in your GPU settings and check MaxResolution in skmod.ini. This only works in the Fullscreen screen mode, not in window or borderless mode.
+[b]- There's no resolution above my monitor's.[/b]
+Enable DSR (NVIDIA Control Panel) or VSR (AMD Software) first, and use the Fullscreen screen mode. Windowed and borderless always match the desktop. MaxResolution in skmod.ini sets the target.
 
-[b]- I want the menus snappier.[/b]
-Set [b]FastMenus=1[/b] in skmod.ini. Menu animations then run faster at high frame rates.
+[b]- Menus feel slow at high FPS.[/b]
+They now run at their original speed. If you liked them faster, set [b]FastMenus=1[/b] in skmod.ini.
 
-[b]- My antivirus warns about dinput8.dll.[/b]
-That's a false alarm: the mod works by loading into the game and patching it in memory, which some scanners flag on principle. If yours removes it, restore it and add an exception for the game folder.
+[b]- My antivirus flagged dinput8.dll.[/b]
+A false positive. Mods that load into a game and change its code in memory trip some heuristic scanners. Restore the file and add the game folder as an exception.
 
-[b]- I want to remove it.[/b]
-Delete [b]dinput8.dll[/b], [b]skmod.ini[/b] and [b]skmod.log[/b] from the game folder.
+[b]- How do I uninstall?[/b]
+Remove [b]dinput8.dll[/b], [b]skmod.ini[/b] and [b]skmod.log[/b] from the game folder. Nothing else was changed.
