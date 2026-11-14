@@ -123,6 +123,11 @@ static int fix_intro(int mode) {
    wheel turned by (int)0.5 = 0 and the menu hung): those loads read ui_step's whole step instead. ---- */
 static const ULONGLONG dt_clamp[2] = {0x14013b362, 0x14015e175};
 static const ULONGLONG shop_dt[4] = {0x140199529, 0x14019a128, 0x14019a1ca, 0x14019a262};
+/* Held buttons repeat (menu cursors) after 16 frames, then every 6 (set at startup, counted down once
+   per frame in 1402578e0): at 120 fps a normal tap already moved the cursor twice. Scaled to the
+   frame rate (32 and 12 at 120 fps) = the same 267 ms / 100 ms as at 60 fps. */
+static const ULONGLONG rep_set[2] = {0x140257582, 0x14025758e}, rep_var[2] = {0x140d102c0, 0x140d10094};
+static const int rep_frames[2] = {16, 6};
 void obj_adv(void), mat_adv(void), ui_step(void);
 float ui_acc; int fast_menus;
 ULONGLONG g_frametime, g_wstep;                     /* g_wstep: float in the slot page (near the exe) */
@@ -162,6 +167,9 @@ static int fix_fps(int f, int fast) {
     if (!is(0x140214247, "\x0f\x2f\xf0\x77\x03\x0f\x28\xf0", 8)) return 0;   /* UI: comiss xmm6, xmm0; ja +3 */
     for (i = 0; i < 4; i++)                                 /* shop: movss xmmN, [rip -> frame time] */
         if (!is(shop_dt[i], "\xf3\x0f\x10", 3) || rip_target(shop_dt[i], 4, 8) != VA(0x1405c6f0c)) return 0;
+    for (i = 0; i < 2; i++)                                 /* mov [repeat delay/interval], 16 / 6 (frames) */
+        if (!is(rep_set[i], "\xc7\x05", 2) || rip_target(rep_set[i], 2, 10) != VA(rep_var[i]) ||
+            *(int *)VA(rep_set[i] + 6) != rep_frames[i]) return 0;
     if (!is(0x14025bca9, "\xe8", 1) || rip_target(0x14025bca9, 1, 5) != VA(0x140259a30) ||
         !is(0x14025bc9c, "\x0f\x28\xd7", 3)) return 0;      /* movaps xmm2, xmm7 (fraction) */
     if (f == 60) return 1;
@@ -169,6 +177,10 @@ static int fix_fps(int f, int fast) {
        8 event character step, 16 default-speed object/material animations, 32 rotations between keys */
     parts = opt("FpsParts", 63);
     if ((parts & 32) && !call_at(0x14025bca9, rot_blend, 5)) return 0;
+    for (i = 0; i < 2 && (parts & 1); i++) {                /* button repeat counted in frames: scale */
+        int n = (rep_frames[i] * f + 30) / 60;
+        put(VA(rep_set[i] + 6), &n, 4);
+    }
     fast_menus = fast;
     if (parts & 1) {                                        /* menus/UI and shop: whole steps */
         BYTE *page = near_jmp(0);                           /* any slot address = the page near the exe */
