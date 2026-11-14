@@ -1,0 +1,53 @@
+The PC version of SENRAN KAGURA ESTIVAL VERSUS has some annoying problems: shimmering and sparkling textures, grainy flickering shadows, skin blotches flickering through swimsuits in zoomed-in shots, a 60 FPS cap, and a long boot through logos and videos. [b]SKEV+[/b] fixes all of that.
+
+It's basically [b]one file[/b] that you drop into the game folder. It doesn't change your game files, and you can turn any fix off whenever you want.
+
+If a future update changes the game, [b]SKEV+[/b] just skips the parts it doesn't recognize instead of breaking everything.
+
+[h2]What you get[/h2]
+[list]
+[*][b]Clean, sharp textures.[/b] No more shimmering wood, decks and sand, near or far, standing still or in motion.
+[*][b]Better shadows.[/b] Sharper, and no more bright speckles flickering inside them.
+[*][b]No more flickering skin blotches[/b] through swimsuits when the camera zooms in from far away.
+[*][b]120 FPS and more[/b] (up to 360), with the game running at its normal speed. Fights, finishers, transformations, entrances, defeat scenes, Library replays, the sea and sky, menus and the lottery all play at the right speed.
+[*][b]Higher resolutions[/b] if you use DSR (NVIDIA) or VSR (AMD).
+[*][b]Faster boot.[/b] It skips the intro logos and the opening movie.
+[/list]
+
+[b]Download:[/b]
+[quote]LINK HERE[/quote]
+
+[olist]
+[*]Download [b]SKEV+[/b] from the link above and unzip it.
+[*]Open your game folder. In your Steam Library, right-click [b]SENRAN KAGURA ESTIVAL VERSUS[/b], then go to [b]Manage > Browse local files[/b]. You should see [b]SKEstivalVersus.exe[/b] in there.
+[*]Copy [b]dinput8.dll[/b] and [b]skmod.ini[/b] into that folder, right next to SKEstivalVersus.exe.
+[*]Start the game [b]from Steam[/b].
+[/olist]
+
+[h2]Is it working?[/h2]
+If the intro logos are gone and you land straight on the title screen, [b]SKEV+[/b] is running. The very first start of a new save still shows the prologue, as the game always does.
+
+The default settings are already the recommended ones, so you don't have to change anything. Every option is explained in [b]skmod.ini[/b], if you want to tweak something.
+
+[h2]Steam Deck and Linux[/h2]
+Not tested yet, reports welcome. In Steam, right-click the game > [b]Properties[/b] > [b]Launch Options[/b], and enter:
+[code]WINEDLLOVERRIDES="dinput8=n,b" %command%[/code]
+
+[h1]Something's wrong?[/h1]
+[b]- A fix doesn't seem to work.[/b]
+Open [b]skmod.log[/b] in the game folder. It lists every fix as on, off or SKIPPED. "SKIPPED - unexpected exe bytes" means a game update changed something the mod doesn't know yet. Everything else still works.
+
+[b]- The game doesn't go above 60 FPS.[/b]
+Set the frame rate to 60 in the game's own settings (30 gives half of the FrameRate in skmod.ini). With V-Sync on, your monitor's refresh rate is the limit: a 60 Hz screen stays at 60.
+
+[b]- I can't get resolutions above my monitor's.[/b]
+Turn on DSR/VSR in your GPU settings and check MaxResolution in skmod.ini. This only works in the Fullscreen screen mode, not in window or borderless mode.
+
+[b]- I want the menus snappier.[/b]
+Set [b]FastMenus=1[/b] in skmod.ini. Menu animations then run faster at high frame rates.
+
+[b]- My antivirus warns about dinput8.dll.[/b]
+That's a false alarm: the mod works by loading into the game and patching it in memory, which some scanners flag on principle. If yours removes it, restore it and add an exception for the game folder.
+
+[b]- I want to remove it.[/b]
+Delete [b]dinput8.dll[/b], [b]skmod.ini[/b] and [b]skmod.log[/b] from the game folder.

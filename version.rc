@@ -19,7 +19,7 @@ BEGIN
             VALUE "ProductVersion", MOD_VER_STR
             VALUE "FileDescription", MOD_NAME " - fixes and options for " MOD_GAME
             VALUE "FileVersion", MOD_VER_STR
-            VALUE "LegalCopyright", "(c) " MOD_YEAR " " MOD_NAME ". Free to use."
+            VALUE "LegalCopyright", "(c) " MOD_YEAR " " MOD_NAME ". Free to use, see README."
             VALUE "Comments", MOD_NOTICE
             VALUE "InternalName", "dinput8.dll"
             VALUE "OriginalFilename", "dinput8.dll"
