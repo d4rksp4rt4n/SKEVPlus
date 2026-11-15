@@ -6,3 +6,4 @@ dinput8.dll
 *.log
 *.bak
 test_mipshader.exe
+*.zip
