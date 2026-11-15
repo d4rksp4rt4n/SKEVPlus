@@ -1,7 +1,7 @@
 ; Small x64 stubs called from the game's code (via a jump slot near the exe, see near_jmp in skmod.c).
 ; Each replaces the game instructions noted and keeps every register the game still uses there.
 EXTERN g_scene:QWORD, g_flag:QWORD, g_app:QWORD, res_w:DWORD, res_h:DWORD, fov_ref:DWORD, near_max:DWORD, one_f:DWORD, shadow_vt:QWORD, g_dofnear:QWORD, shadow_ret:QWORD
-EXTERN g_frametime:QWORD, ui_acc:DWORD, g_wstep:QWORD, fast_menus:DWORD
+EXTERN g_frametime:QWORD, ui_acc:DWORD, g_wstep:QWORD, fast_menus:DWORD, g_gamestep:QWORD, shop_model_fn:QWORD
 .code
 
 ; FrameRate: menu/UI code was written for steps of at least 1/60 s and often truncates the step to a
@@ -36,6 +36,15 @@ not_yet:
 keep_one:
     ret
 ui_step ENDP
+
+; FrameRate: the shop passes its (now whole) step to the clerk's model update too; a step of 0 on
+; every other frame made her chest alternate between two poses (ghosting at 120 fps). That call
+; (replaces "call 140198a20" after "movaps xmm0, xmm6") gets the real frame-time step instead.
+shop_model PROC
+    mov rax, g_gamestep
+    movss xmm0, dword ptr [rax]
+    jmp qword ptr shop_model_fn
+shop_model ENDP
 
 ; FrameRate: model instances advance their object animation (frame +60h += speed +64h) and material
 ; animation (frame +80h += speed +84h) once per frame. Some callers set the speed from the frame time

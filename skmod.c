@@ -131,6 +131,8 @@ static const int rep_frames[2] = {16, 6};
 void obj_adv(void), mat_adv(void), ui_step(void);
 float ui_acc; int fast_menus;
 ULONGLONG g_frametime, g_wstep;                     /* g_wstep: float in the slot page (near the exe) */
+ULONGLONG g_gamestep, shop_model_fn;                /* shop clerk model: real step (1405c6f0c), 140198a20 */
+void shop_model(void);
 
 /* Motions with float keys per frame (Tamlib TMO; the TCM camera motions of finishers and the menu):
    on whole frames each bone gets its key's Euler angles as stored; between frames (only seen above
@@ -167,6 +169,7 @@ static int fix_fps(int f, int fast) {
     if (!is(0x140214247, "\x0f\x2f\xf0\x77\x03\x0f\x28\xf0", 8)) return 0;   /* UI: comiss xmm6, xmm0; ja +3 */
     for (i = 0; i < 4; i++)                                 /* shop: movss xmmN, [rip -> frame time] */
         if (!is(shop_dt[i], "\xf3\x0f\x10", 3) || rip_target(shop_dt[i], 4, 8) != VA(0x1405c6f0c)) return 0;
+    if (!is(0x140199be9, "\x0f\x28\xc6\xe8", 4) || rip_target(0x140199bec, 1, 5) != VA(0x140198a20)) return 0;
     for (i = 0; i < 2; i++)                                 /* mov [repeat delay/interval], 16 / 6 (frames) */
         if (!is(rep_set[i], "\xc7\x05", 2) || rip_target(rep_set[i], 2, 10) != VA(rep_var[i]) ||
             *(int *)VA(rep_set[i] + 6) != rep_frames[i]) return 0;
@@ -193,6 +196,9 @@ static int fix_fps(int f, int fast) {
             int d = (int)((BYTE *)g_wstep - (VA(shop_dt[i]) + 8));
             put(VA(shop_dt[i] + 4), &d, 4);
         }
+        g_gamestep = (ULONGLONG)VA(0x1405c6f0c);
+        shop_model_fn = (ULONGLONG)VA(0x140198a20);
+        if (!call_at(0x140199bec, shop_model, 5)) return 0;
     }
     t[0] = f / 2; t[1] = f;
     put(VA(0x140573af8), t, sizeof t);
