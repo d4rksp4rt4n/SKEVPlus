@@ -40,3 +40,8 @@ The game files on disk are never changed: everything is patched in memory while 
 ## Uninstall
 
 Delete `dinput8.dll`, `skmod.ini` and `skmod.log` from the game folder.
+
+## AI use
+
+This mod was made with help from an AI coding assistant (Claude Code).
+
